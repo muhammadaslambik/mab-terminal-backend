@@ -1,16 +1,15 @@
 name = "mab-terminal-backend"
 main = "src/index.ts"
-compatibility_date = "2026-10-11"
+compatibility_date = "2025-01-01"
 
-[kv_namespaces]
-# Buka tanda pagar jika KV Cache Supabase sudah siap di Cloudflare
-# { binding = "KV_CACHE", id = "ID_KV_REPLACE_ME" }
+# Konfigurasi KV dibiarkan nonaktif/kosong dengan benar tanpa memicu error array
+kv_namespaces = []
 
 [triggers]
 crons = [
-  "0 1 * * *",  # screening_pagi (08:00 WIB / 01:00 UTC)
+  "0 1 * * *",   # screening_pagi (08:00 WIB / 01:00 UTC)
   "*/5 * * * *", # market_polling (Tiap 5 menit)
-  "0 14 * * *", # rekap_sore (21:00 WIB / 14:00 UTC)
-  "0 13 * * *", # health_check (20:00 WIB / 13:00 UTC)
-  "0 0 */3 * *" # keep_alive (Tiap 3 hari)
+  "0 14 * * *",  # rekap_sore (21:00 WIB / 14:00 UTC)
+  "0 13 * * *",  # health_check (20:00 WIB / 13:00 UTC)
+  "0 0 */3 * *"  # keep_alive (Tiap 3 hari)
 ]
