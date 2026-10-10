@@ -7,8 +7,13 @@ export default {
     }
 
     if (url.pathname === "/api/trade-test") {
+      // Hanya boleh diakses dengan token rahasia
+      const auth = request.headers.get("Authorization");
+      if (!env.API_TOKEN || auth !== `Bearer ${env.API_TOKEN}`) {
+        return Response.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
       try {
-        // Dimuat hanya saat route ini dipanggil
         const { MarketOrchestrator } = await import("./core/orchestrator");
         const orchestrator = new MarketOrchestrator();
 
@@ -51,10 +56,11 @@ export default {
           break;
         }
         default:
-          console.log(`Cron ${event.cron} triggered.`);
+          console.log(`Cron ${event.cron} belum punya handler.`);
       }
     } catch (err) {
       console.error(`Cron ${event.cron} gagal:`, err);
+      throw err; // supaya kegagalan tercatat di dashboard Cloudflare
     }
   },
 };
