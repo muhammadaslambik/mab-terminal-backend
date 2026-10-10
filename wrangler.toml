@@ -1,23 +1,16 @@
 name = "mab-terminal-backend"
 main = "src/index.ts"
-compatibility_date = "2024-10-01"
+compatibility_date = "2026-10-11"
+
+[kv_namespaces]
+# Buka tanda pagar jika KV Cache Supabase sudah siap di Cloudflare
+# { binding = "KV_CACHE", id = "ID_KV_REPLACE_ME" }
 
 [triggers]
 crons = [
-  "0 1 * * 1-5",      # 08.00 WIB screening pagi (Sen-Jum)
-  "*/1 * * * *",      # market polling (di-guard jam bursa di dalam kode)
-  "0 14 * * *",       # 21.00 WIB rekap sore
-  "0 13 * * *",       # 20.00 WIB health check
-  "0 18 */2 * *",     # keep-alive Neon/Supabase tiap 2 hari
+  "0 1 * * *",  # screening_pagi (08:00 WIB / 01:00 UTC)
+  "*/5 * * * *", # market_polling (Tiap 5 menit)
+  "0 14 * * *", # rekap_sore (21:00 WIB / 14:00 UTC)
+  "0 13 * * *", # health_check (20:00 WIB / 13:00 UTC)
+  "0 0 */3 * *" # keep_alive (Tiap 3 hari)
 ]
-
-[[kv_namespaces]]
-binding = "CACHE"
-id = "ISI_ID_KV_ANDA"
-
-[vars]
-ENV = "production"
-
-# secrets (wrangler secret put):
-# BINANCE_API_BASE (opsional), FINNHUB_KEY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
-# NEON_CONNECTION_STRING, SUPABASE_URL, SUPABASE_SERVICE_KEY
