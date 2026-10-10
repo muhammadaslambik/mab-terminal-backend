@@ -1,3 +1,5 @@
+import type { AssetClass } from "./engines/types";
+
 export default {
   async fetch(request: Request, env: any, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -14,19 +16,16 @@ export default {
       }
 
       try {
+        // Dimuat hanya saat route ini dipanggil
         const { MarketOrchestrator } = await import("./core/orchestrator");
-        const orchestrator = new MarketOrchestrator();
+        const { buildMockInput } = await import("./utils/mock");
 
-        const mockMarketData = { current: 2650, high: 2700, low: 2600, ema50: 2620, ema200: 2500, stochK: 18, stochD: 15 };
-        const mockRiskMetrics = { currentDrawdownPercent: 1.2, isKillSwitchTriggered: false, safeModeActive: false };
-        const mockTargetDates = ["2026-10-12"];
+        // Contoh: /api/trade-test?asset=XAUUSD (default CRYPTO karena buka 24/7)
+        const asset = (url.searchParams.get("asset") ?? "CRYPTO") as AssetClass;
+        const input = buildMockInput(asset);
+        const riskMetrics = { currentDrawdownPercent: 1.2, isKillSwitchTriggered: false, safeModeActive: false };
 
-        const decision = await orchestrator.orchestrateAssetAnalysis(
-          "XAUUSD",
-          mockMarketData,
-          mockRiskMetrics,
-          JSON.stringify(mockTargetDates)
-        );
+        const decision = await new MarketOrchestrator().orchestrateAssetAnalysis(input, riskMetrics);
         return Response.json({ result: decision });
       } catch (err) {
         console.error("trade-test error:", err);

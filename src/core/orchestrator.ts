@@ -1,49 +1,32 @@
-export interface MarketData {
-  current: number; high: number; low: number;
-  ema50: number; ema200: number; stochK: number; stochD: number;
-}
+import type { AnalysisInput, Engine, EngineSignal, RiskMetrics, TradeDecision } from "../engines/types";
+import { abstain } from "../engines/common";
+import { engines } from "../engines/registry";
+import { RiskGuardian } from "./risk_guardian";
+import { SignalManager } from "./signal_manager";
 
-export interface RiskMetrics {
-  currentDrawdownPercent: number;
-  isKillSwitchTriggered: boolean;
-  safeModeActive: boolean;
-}
-
-export interface TradeDecision {
-  symbol: string;
-  action: "BUY" | "SELL" | "HOLD";
-  reason: string;
-  targetDates: string[];
+/** Satu engine yang error tidak boleh menjatuhkan seluruh analisa. */
+function safeAnalyze(engine: Engine, input: AnalysisInput): EngineSignal {
+  try {
+    return engine.analyze(input);
+  } catch (err) {
+    return abstain(engine.name, `Error: ${String(err)}`, ["ENGINE_ERROR"]);
+  }
 }
 
 export class MarketOrchestrator {
-  async orchestrateAssetAnalysis(
-    symbol: string,
-    marketData: MarketData,
-    riskMetrics: RiskMetrics,
-    targetDatesJson: string
-  ): Promise<TradeDecision> {
-    let targetDates: string[] = [];
-    try {
-      targetDates = JSON.parse(targetDatesJson);
-    } catch {
-      targetDates = [];
-    }
+  private guardian = new RiskGuardian();
+  private manager = new SignalManager();
 
-    // Risk guard selalu didahulukan
-    if (riskMetrics.isKillSwitchTriggered || riskMetrics.safeModeActive) {
-      return { symbol, action: "HOLD", reason: "Risk guard aktif", targetDates };
-    }
+  async orchestrateAssetAnalysis(input: AnalysisInput, riskMetrics: RiskMetrics): Promise<TradeDecision> {
+    const signals = engines.map((e) => safeAnalyze(e, input));
+    const result = this.manager.combine(signals);
+    const base = { symbol: input.symbol, targetDates: input.targetDates ?? [], signals };
 
-    const uptrend = marketData.current > marketData.ema50 && marketData.ema50 > marketData.ema200;
-    const downtrend = marketData.current < marketData.ema50 && marketData.ema50 < marketData.ema200;
-
-    if (uptrend && marketData.stochK < 20) {
-      return { symbol, action: "BUY", reason: "Uptrend + stochastic oversold", targetDates };
+    // Risk guard memblokir posisi baru, tetapi sinyal keluar tetap boleh lewat
+    const risk = this.guardian.check(riskMetrics);
+    if (!risk.allowed && result.action === "BUY") {
+      return { ...base, action: "HOLD", confidence: 0, reason: `Entry diblokir: ${risk.reason}` };
     }
-    if (downtrend && marketData.stochK > 80) {
-      return { symbol, action: "SELL", reason: "Downtrend + stochastic overbought", targetDates };
-    }
-    return { symbol, action: "HOLD", reason: "Tidak ada sinyal", targetDates };
+    return { ...base, action: result.action, confidence: result.confidence, reason: result.reason, lead: result.lead };
   }
 }
