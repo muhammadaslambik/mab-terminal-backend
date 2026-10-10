@@ -8,6 +8,34 @@ export default {
       return Response.json({ status: "healthy" });
     }
 
+    if (url.pathname === "/api/signals") {
+      const auth = request.headers.get("Authorization");
+      if (!env.API_TOKEN || auth !== `Bearer ${env.API_TOKEN}`) {
+        return Response.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      // Contoh: /api/signals?symbols=BTC,ETH
+      const symbols = (url.searchParams.get("symbols") ?? "BTC,ETH")
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter((s) => /^[A-Z0-9]{2,10}$/.test(s))
+        .slice(0, 5);
+
+      const { analyzeCrypto } = await import("./core/analysis_service");
+      const signals = await Promise.all(
+        symbols.map(async (s) => {
+          try {
+            const cached: any = env.KV_CACHE ? await env.KV_CACHE.get(`SIGNAL_${s}`, "json") : null;
+            if (cached) return { symbol: s, computedAt: cached.computedAt, decision: cached.decision };
+            return { symbol: s, computedAt: Date.now(), decision: await analyzeCrypto(s) };
+          } catch (err) {
+            return { symbol: s, error: String(err) };
+          }
+        })
+      );
+      return Response.json({ generatedAt: new Date().toISOString(), signals });
+    }
+
     if (url.pathname === "/api/trade-test") {
       // Hanya boleh diakses dengan token rahasia
       const auth = request.headers.get("Authorization");
