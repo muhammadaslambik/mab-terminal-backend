@@ -36,6 +36,26 @@ export default {
       return Response.json({ generatedAt: new Date().toISOString(), signals });
     }
 
+    if (url.pathname === "/api/idx/screen" || url.pathname === "/api/idx/probe") {
+      const auth = request.headers.get("Authorization");
+      if (!env.API_TOKEN || auth !== `Bearer ${env.API_TOKEN}`) {
+        return Response.json({ error: "Unauthorized" }, { status: 401 });
+      }
+      try {
+        if (url.pathname === "/api/idx/probe") {
+          const { PasardanaFeed } = await import("./feed/pasardana");
+          return Response.json(await new PasardanaFeed().probe());
+        }
+        const cached: any = env.KV_CACHE ? await env.KV_CACHE.get("IDX_SCREEN", "json") : null;
+        if (cached) return Response.json(cached);
+        const { handleIdxScreening } = await import("./cron/idx_screening");
+        const screen = await handleIdxScreening({});
+        return screen ? Response.json(screen) : Response.json({ error: "Data Pasardana tidak tersedia, coba /api/idx/probe" }, { status: 502 });
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
+
     if (url.pathname === "/api/trade-test") {
       // Hanya boleh diakses dengan token rahasia
       const auth = request.headers.get("Authorization");
@@ -73,6 +93,12 @@ export default {
           break;
         }
         case "0 1 * * *": {
+          try {
+            const { handleIdxScreening } = await import("./cron/idx_screening");
+            await handleIdxScreening(env);
+          } catch (err) {
+            console.error("IDX screening gagal:", err);
+          }
           const { handleScreeningPagi } = await import("./cron/screening_pagi");
           await handleScreeningPagi(env, ctx);
           break;
