@@ -1,5 +1,6 @@
 import type { AnalysisInput, RiskMetrics, TradeDecision } from "../engines/types";
 import { BinanceFeed } from "../feed/binance";
+import { YahooFeed } from "../feed/yahoo";
 import { MarketOrchestrator } from "./orchestrator";
 
 // Sementara: belum ada pelacakan portofolio, jadi risk guard memakai nilai netral.
@@ -26,6 +27,32 @@ export async function analyzeCrypto(symbol: string, equity = 10_000, risk: RiskM
     candles,
     candlesLow,
     candlesHigh,
+  };
+  return new MarketOrchestrator().orchestrateAssetAnalysis(input, risk);
+}
+
+/**
+ * Analisa satu saham Indonesia dari candle harian Yahoo (kode tanpa ".JK").
+ * Saat ini hanya engine berbasis candle yang aktif; Andry Hakim butuh data fundamental
+ * dan Remora butuh order book, jadi keduanya otomatis abstain.
+ */
+export async function analyzeIdx(
+  code: string,
+  marketRank?: { topGainer?: boolean; topValue?: boolean },
+  equity = 100_000_000,
+  risk: RiskMetrics = NO_RISK
+): Promise<TradeDecision> {
+  const symbol = code.toUpperCase().replace(/\.JK$/, "");
+  const candles = await new YahooFeed().getCandles(`${symbol}.JK`, "2y", "1d");
+  if (candles.length === 0) throw new Error(`Data candle ${symbol}.JK kosong (Yahoo tidak merespons)`);
+
+  const input: AnalysisInput = {
+    symbol,
+    assetClass: "ID_STOCK",
+    now: new Date().toISOString(),
+    equity,
+    candles,
+    marketRank,
   };
   return new MarketOrchestrator().orchestrateAssetAnalysis(input, risk);
 }

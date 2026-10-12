@@ -348,6 +348,8 @@ function prepare(input: AnalysisInput, name: string, hasPos: boolean): Prepared 
     return { ok: false, signal: { engine: name, action: "HOLD", confidence: 0.3, reason: `Diduga suspensi ${fmt(frozenDays, 0)} hari`, tags } };
   }
   if (!hasPos) {
+    // Tanpa data fundamental engine tidak ikut voting (bukan memilih HOLD)
+    if (!input.fundamentals) return { ok: false, signal: abstain(name, "Data fundamental tidak tersedia", ["DATA_INSUFFICIENT"]) };
     const pre = universalPrefilter(input);
     if (!pre.passed) return { ok: false, signal: hold(name, `Veto: ${pre.reason}`, ["PREFILTER_VETO"]) };
   }
