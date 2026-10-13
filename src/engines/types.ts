@@ -27,8 +27,10 @@ export interface Fundamentals {
   operatingCashFlow?: number;
   netProfitQuarters?: number[]; // laba bersih per kuartal, lama -> baru
   ocfQuarters?: number[]; // arus kas operasional per kuartal, lama -> baru
-  freeFloatPercent?: number;
+  freeFloatPercent?: number; // kepemilikan publik (%)
   macroCatalyst?: boolean; // katalis makro / relaksasi regulasi
+  return1y?: number; // pecahan: -0.5 = turun 50% dalam 1 tahun
+  sharesOutstanding?: number; // jumlah saham beredar (market cap / harga)
 }
 
 export interface Compliance {
@@ -78,6 +80,29 @@ export interface OpenPosition {
   classification?: string; // mis. PREMIUM_DOUBLE_SIGNAL
   partialSoldPct?: number; // 0..1, porsi yang sudah dijual
   eventAnnouncedAt?: string;
+  exposurePct?: number; // porsi saat ini terhadap ekuitas (%)
+}
+
+/** Hasil riset manual per emiten (lihat src/data/intel.ts). */
+export interface Intel {
+  rumor?: "NONE" | "RUMOR" | "CREDIBLE" | "DEBUNKED"; // informasi belum resmi / terbantahkan
+  injection?: {
+    kind?: "CASH" | "ASSET" | "COOPERATION";
+    plannedRp?: number; // nilai suntikan yang direncanakan
+    receivedRp?: number; // nilai dana/aset yang BENAR-BENAR sudah masuk
+    official?: boolean; // sudah ada keterbukaan informasi resmi
+    cancelled?: boolean;
+  };
+  acquirer?: {
+    name?: string;
+    type?: "CONGLOMERATE_ID" | "CONGLOMERATE_FOREIGN" | "OTHER" | "AFFILIATED"; // AFFILIATED = pihak terafiliasi/milik owner sendiri
+    netWorthRp?: number; // kekayaan pembeli/grupnya
+  };
+  valuation?: {
+    assetFairValueRp?: number; // total aset pada nilai wajar/revaluasi (mis. tanah dinilai harga pasar)
+    liabilitiesRp?: number; // total kewajiban (kosong dianggap 0)
+  };
+  notes?: string;
 }
 
 export interface AnalysisInput {
@@ -100,6 +125,7 @@ export interface AnalysisInput {
   trades?: Trade[];
   trackBExposurePct?: number; // eksposur Track B murni saat ini (% portofolio)
   position?: OpenPosition;
+  intel?: Intel;
 }
 
 export interface RiskMetrics {

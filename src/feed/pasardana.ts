@@ -33,6 +33,7 @@ export interface IdxStock {
   changePct?: number; // dihitung dari Last vs PrevClosingPrice
   marketCap?: number; // satuan mengikuti Pasardana (lihat CAP_UNIT di idx_screener)
   beta?: number;
+  oneYear?: number; // return 1 tahun, pecahan (-0.5 = -50%)
   roe?: number; // pecahan (0.04 = 4%)
   freeFloatPct?: number; // persen (64.62 = 64,62%)
   perAnnualized?: number;
@@ -108,6 +109,7 @@ export function normalizeStock(rec: any): IdxStock | null {
     changePct,
     marketCap: num(field(rec, "Capitalization")),
     beta: num(field(rec, "BetaOneYear")),
+    oneYear: num(field(rec, "OneYear")),
     roe: num(field(rec, "Roe")),
     freeFloatPct: num(field(rec, "FreeFloatPct")),
     perAnnualized: num(field(rec, "PerAnnualized")),

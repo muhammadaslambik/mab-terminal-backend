@@ -1,7 +1,8 @@
 /**
  * an4_andry_hakim — Andry Hakim (khusus saham Indonesia / BEI)
  *   an4V1: Deep Value & Turnaround + Bandarmologi
- *   an4V2: "Cacing-Cacing Naga-Naga" (shell stock & event-driven corporate action)
+ *   an4V2: "Cacing-Cacing Naga-Naga": perusahaan kecil, hutang hampir nol, dikuasai owner, dan akan membesar bila ada
+ *          suntikan dana/aset NYATA >= Rp1 triliun. Beli cicil saat rumor, all-in saat fakta terkonfirmasi.
  *   an4V3: Hybrid Value-Event Engine (klasifikasi Track A/B/Hybrid + confluence scoring)
  * Data fundamental, broker summary, dan keterbukaan informasi dikirim lewat AnalysisInput.
  */
@@ -23,6 +24,19 @@ const TRAILING = 0.15;
 const SIDEWAYS_SHORT = 0.15; // rentang harga maks untuk "sideways" 30-60 hari
 const SIDEWAYS_LONG = 0.2; // rentang harga maks untuk fase akumulasi panjang
 const TRACK_B_PURE_MAX_EXPOSURE_PCT = 10; // batas bawah dari aturan 10-15%
+// --- Tesis suntikan dana (V2) ---
+const DER_MAX = 0.1; // "hutang hampir nol"
+const FREE_FLOAT_MAX = 30; // kepemilikan publik > 30% dianggap jelek (owner >= 70%)
+const CRASH_1Y = -0.5; // turun >= 50% dalam 1 tahun = indikasi saham gorengan
+const INJECTION_MIN_RP = 1_000_000_000_000; // suntikan minimal Rp1 triliun
+const CICIL_TRANCHE_PCT = 0.5; // satu tahap cicil (% ekuitas)
+const CICIL_MAX_PCT = 2.5; // plafon total fase cicil per emiten
+const PLANNED_TARGET_PCT = 5; // deal resmi >= Rp1 T tetapi dana belum masuk
+const ALL_IN_TARGET_PCT = 10; // dana/aset >= Rp1 T benar-benar masuk
+const STRATEGY_MAX_EXPOSURE_PCT = 20; // total eksposur seluruh posisi strategi ini
+const REVIEW_DAYS = 180; // cicil tanpa konfirmasi selama 6 bulan -> tinjau ulang
+const NAV_CHEAP_MAX = 0.7; // harga <= 70% NAV per saham = murah
+const NAV_FAIR_MAX = 1.0; // harga <= NAV per saham = wajar; di atasnya mahal
 const PHASE3_DAYS = 182; // ~6 bulan tanpa event -> evaluasi skema exit Track A
 
 const KEYWORDS = [
@@ -34,6 +48,7 @@ const KEYWORDS = [
   "rupslb",
 ];
 const CONTROL_KEYWORDS = ["perubahan pengendali", "pmthmetd"];
+const CANCEL_WORDS = ["pembatalan", "dibatalkan", "tidak jadi"];
 
 /* ------------------------- DATA VALIDATION & VOLUME ------------------------ */
 
@@ -115,20 +130,29 @@ export interface EventScan {
   anyEvent: boolean;
   controlChange: boolean;
   suddenAudit: boolean;
+  cancelled: boolean; // pengumuman aksi korporasi yang menyebut pembatalan
 }
 
 export function parseCorporateAnnouncements(anns: Announcement[], sinceIso: string): EventScan {
   const since = sinceIso.slice(0, 10);
   const hits = new Set<string>();
   let suddenAudit = false;
+  let cancelled = false;
   for (const a of anns) {
     if (a.date.slice(0, 10) < since) continue;
     const text = `${a.title} ${a.body ?? ""}`.toLowerCase();
-    for (const k of KEYWORDS) if (text.includes(k)) hits.add(k);
+    let hit = false;
+    for (const k of KEYWORDS) {
+      if (text.includes(k)) {
+        hits.add(k);
+        hit = true;
+      }
+    }
+    if (hit && CANCEL_WORDS.some((w) => text.includes(w))) cancelled = true;
     if (text.includes("laporan keuangan interim") && text.includes("audit")) suddenAudit = true;
   }
   const list = [...hits];
-  return { hits: list, anyEvent: list.length > 0, controlChange: list.some((k) => CONTROL_KEYWORDS.includes(k)), suddenAudit };
+  return { hits: list, anyEvent: list.length > 0, controlChange: list.some((k) => CONTROL_KEYWORDS.includes(k)), suddenAudit, cancelled };
 }
 
 const sinceDays = (nowIso: string, days: number): string => new Date(Date.parse(nowIso) - days * 86_400_000).toISOString().slice(0, 10);
@@ -183,7 +207,7 @@ export function filterShellCompanies(f: Fundamentals): ShellResult {
   const pbvDistress = f.pbv !== undefined && f.pbv < 1; // termasuk PBV negatif
   const neg4 = (a?: number[]): boolean => !!a && a.length >= 4 && a.slice(-4).every((x) => x < 0);
   const stagnation = neg4(f.ocfQuarters) || neg4(f.netProfitQuarters);
-  const freeFloatOk = f.freeFloatPercent !== undefined && f.freeFloatPercent >= 7 && f.freeFloatPercent <= 15;
+  const freeFloatOk = f.freeFloatPercent !== undefined && f.freeFloatPercent > 0 && f.freeFloatPercent <= FREE_FLOAT_MAX; // owner dominan
   return { microCap, pbvDistress, stagnation, freeFloatOk, count: [microCap, pbvDistress, stagnation, freeFloatOk].filter(Boolean).length };
 }
 
@@ -279,6 +303,30 @@ const exitSignal = (engine: string, fraction: number, reason: string, tag: strin
   tags: ["EXIT", tag],
 });
 
+/**
+ * DARURAT (mode "cacing"): rumor batal, suntikan dibatalkan, atau pengumuman pembatalan -> jual SEMUA posisi.
+ * Dicek paling awal, tidak bergantung pada data lain (DER, Pasardana, hari bursa), dan tidak bisa diblokir risk guard.
+ */
+export function emergencyExit(engine: string, input: AnalysisInput): EngineSignal | null {
+  const pos = input.position;
+  if (!pos) return null;
+  const intel = input.intel;
+  const ev = parseCorporateAnnouncements(input.announcements ?? [], pos.openedAt);
+  const cause = intel?.rumor === "DEBUNKED" ? "rumor terbantahkan" : intel?.injection?.cancelled ? "suntikan dibatalkan" : ev.cancelled ? "pembatalan di keterbukaan informasi" : null;
+  if (!cause) return null;
+  const candles = cleanCandles(input.candles);
+  const lowLiquidity = candles.length >= 20 && averageTurnover(candles) < LIQUIDITY_LOCK;
+  return {
+    engine,
+    action: "SELL",
+    confidence: 1,
+    reason: `DARURAT (mode cacing): ${cause}, jual seluruh posisi${lowLiquidity ? ". Likuiditas rendah: pecah order, jangan menunggu" : ""}`,
+    sellFraction: 1,
+    orderType: "MARKET",
+    tags: ["EXIT", "EMERGENCY", "CACING", ...(lowLiquidity ? ["LIQUIDITY_WARNING"] : [])],
+  };
+}
+
 /** Exit valuasi Track A: jual 33% di PBV 0.8, sisanya di PBV >= 1.0, atau saat laba melambat 2 kuartal. */
 export function trackAExit(engine: string, input: AnalysisInput): EngineSignal | null {
   const pos = input.position;
@@ -370,6 +418,9 @@ export const an4V1: Engine = {
     const close = c[c.length - 1].close;
 
     if (hasPos) return trackAExit(NAME_V1, input) ?? hold(NAME_V1, "Tahan posisi (belum ada pemicu exit valuasi)", ["IN_POSITION"]);
+    if (f.der === undefined || !f.netProfitQuarters || f.netProfitQuarters.length < 3) {
+      return abstain(NAME_V1, "Butuh DER dan laba kuartalan (isi di src/data/intel.ts)", ["NEED_FUNDAMENTALS"]);
+    }
 
     const a = screenFundamentalTurnaround(f);
     if (!a.all) {
@@ -394,55 +445,177 @@ export const an4V1: Engine = {
       takeProfit: calculateIntrinsicTarget(f, close),
       positionPct: 5, // prompt V1 tidak menetapkan sizing; memakai batas atas "track tunggal" V3
       orderType: "MARKET",
-      tags: ["ACCUMULATION_DETECTED", "BREAKOUT_STAGE2"],
+      tags: ["STANDALONE", "ACCUMULATION_DETECTED", "BREAKOUT_STAGE2"],
     };
   },
 };
 
 /* ----------------------------------- V2 ------------------------------------ */
 
+export interface AcquisitionAssessment {
+  structureOk: boolean;
+  structureFails: string[];
+  stage: 0 | 1 | 2 | 3; // 0 tidak ada, 1 cicil (rumor/anomali), 2 deal resmi >= Rp1 T, 3 dana/aset nyata >= Rp1 T masuk
+  triggers: string[];
+  flags: string[]; // tanda bahaya
+  injectionRp: number;
+  multiple?: number; // nilai suntikan / market cap
+  buyerNote?: string;
+  valuation: Valuation;
+}
+
+export interface Valuation {
+  navPerShare?: number;
+  ratio?: number; // harga / NAV per saham
+  basis: "FAIR_VALUE" | "BOOK" | "UNKNOWN";
+  label: "MURAH" | "WAJAR" | "MAHAL" | "UNKNOWN";
+}
+
+/**
+ * Valuasi wajar: (total aset nilai wajar - kewajiban) / jumlah saham = NAV per saham, dibandingkan dengan harga.
+ * Tanpa estimasi nilai wajar dari intel, dipakai nilai buku (harga / PBV).
+ */
+export function assessValuation(input: AnalysisInput, price: number): Valuation {
+  const f = input.fundamentals;
+  const v = input.intel?.valuation;
+  let nav: number | undefined;
+  let basis: Valuation["basis"] = "UNKNOWN";
+  if (v?.assetFairValueRp && f?.sharesOutstanding && f.sharesOutstanding > 0) {
+    nav = (v.assetFairValueRp - (v.liabilitiesRp ?? 0)) / f.sharesOutstanding;
+    basis = "FAIR_VALUE";
+  } else if (f?.pbv !== undefined && f.pbv > 0) {
+    nav = price / f.pbv;
+    basis = "BOOK";
+  }
+  if (nav === undefined || !(nav > 0)) return { basis: "UNKNOWN", label: "UNKNOWN" };
+  const ratio = price / nav;
+  const label = ratio <= NAV_CHEAP_MAX ? "MURAH" : ratio <= NAV_FAIR_MAX ? "WAJAR" : "MAHAL";
+  return { navPerShare: nav, ratio, basis, label };
+}
+
+/** Struktur calon target + tahap bukti suntikan dana. */
+export function assessAcquisition(input: AnalysisInput, candles: Candle[]): AcquisitionAssessment {
+  const f = input.fundamentals!;
+  const intel = input.intel;
+  const inj = intel?.injection;
+  const der = f.der ?? 0;
+  const fails: string[] = [];
+  const flags: string[] = [];
+
+  if (f.marketCap === undefined || f.marketCap >= MICRO_CAP) fails.push("market cap tidak di bawah Rp500 M");
+  if (der > DER_MAX) fails.push(`DER ${fmt(der)} > ${DER_MAX}`);
+  if (f.freeFloatPercent === undefined || f.freeFloatPercent > FREE_FLOAT_MAX) fails.push(`kepemilikan publik > ${FREE_FLOAT_MAX}%`);
+  if (f.return1y !== undefined && f.return1y <= CRASH_1Y) fails.push("harga hancur dalam 1 tahun (indikasi gorengan)");
+
+  const triggers: string[] = [];
+  const acc = volumeAccumulation(candles, 45, SIDEWAYS_SHORT);
+  const ev = parseCorporateAnnouncements(input.announcements ?? [], sinceDays(input.now, 30));
+  if (intel?.rumor === "RUMOR" || intel?.rumor === "CREDIBLE") triggers.push("RUMOR");
+  if (acc.accumulation) triggers.push("AKUMULASI_SENYAP");
+  if (detectVolSpike(candles).spike) triggers.push("VOL_SPIKE");
+  if (input.compliance?.voluntaryInterimAudit === true || ev.suddenAudit) triggers.push("LAPORAN_TERTATA");
+  if (ev.anyEvent) triggers.push("PENGUMUMAN_AKSI_KORPORASI");
+
+  const planned = inj?.plannedRp ?? 0;
+  const received = inj?.receivedRp ?? 0;
+  const affiliated = intel?.acquirer?.type === "AFFILIATED";
+  const debunked = intel?.rumor === "DEBUNKED" || inj?.cancelled === true;
+
+  let stage: 0 | 1 | 2 | 3 = triggers.length ? 1 : 0;
+  if (debunked) {
+    stage = 0;
+    flags.push("DEBUNKED");
+  } else if (received >= INJECTION_MIN_RP) {
+    stage = 3;
+  } else if (planned >= INJECTION_MIN_RP && inj?.official && !affiliated) {
+    stage = 2;
+  }
+  // Pembeli terafiliasi (milik owner sendiri): hanya dana yang benar-benar masuk yang dianggap bukti
+  if (affiliated) flags.push("RED_FLAG_AFFILIATED");
+  if (planned >= INJECTION_MIN_RP && !inj?.official && received < INJECTION_MIN_RP) flags.push("RUMOR_BELUM_RESMI");
+
+  const injectionRp = stage === 3 ? received : Math.max(planned, received); // tahap 3: hanya yang benar-benar masuk
+  const nw = intel?.acquirer?.netWorthRp;
+  return {
+    structureOk: fails.length === 0,
+    structureFails: fails,
+    stage,
+    triggers,
+    flags,
+    injectionRp,
+    multiple: f.marketCap && injectionRp > 0 ? injectionRp / f.marketCap : undefined,
+    buyerNote: nw && injectionRp > 0 ? `kekayaan pembeli ${fmt(nw / injectionRp, 1)}x nilai suntikan` : undefined,
+    valuation: assessValuation(input, candles[candles.length - 1].close),
+  };
+}
+
 export const an4V2: Engine = {
   name: NAME_V2,
   analyze(input: AnalysisInput): EngineSignal {
     const hasPos = ownsPosition(input, NAME_V2);
+    if (hasPos) {
+      const emergency = emergencyExit(NAME_V2, input);
+      if (emergency) return emergency;
+    }
     const p = prepare(input, NAME_V2, hasPos);
     if (!p.ok) return p.signal;
     const f = input.fundamentals;
-    if (!f) return abstain(NAME_V2, "Data fundamental tidak tersedia", ["DATA_INSUFFICIENT"]);
+    if (!f || f.marketCap === undefined || f.freeFloatPercent === undefined) {
+      return abstain(NAME_V2, "Butuh market cap dan free float (Pasardana)", ["DATA_INSUFFICIENT"]);
+    }
+    if (f.der === undefined) return abstain(NAME_V2, "Menunggu data DER (isi di src/data/intel.ts)", ["NEED_DER"]);
+
     const c = p.candles;
     const close = c[c.length - 1].close;
+    const a = assessAcquisition(input, c);
+    const pos = input.position;
 
-    if (hasPos) return trackBExit(NAME_V2, input, c) ?? hold(NAME_V2, "Tahan posisi (trailing stop 15% aktif)", ["IN_POSITION"]);
-
-    const s = filterShellCompanies(f);
-    if (!(s.microCap && s.pbvDistress && s.stagnation)) {
-      return hold(NAME_V2, "Bukan kandidat cangkang (market cap, PBV, stagnasi harus terpenuhi)", ["NOT_SHELL"]);
+    // --- Posisi terbuka: keluar bila terbantahkan, trailing stop setelah deal terkonfirmasi ---
+    if (hasPos && pos) {
+      if (a.stage >= 2) {
+        const highest = Math.max(pos.highestPrice ?? pos.entryPrice, close);
+        if (close < highest * (1 - TRAILING)) return exitSignal(NAME_V2, 1, `Trailing stop 15% dari puncak ${fmt(highest)}`, "TRAILING_STOP");
+      } else if (daysBetween(pos.openedAt, input.now) >= REVIEW_DAYS) {
+        return { engine: NAME_V2, action: "HOLD", confidence: 0.3, reason: "Cicil > 6 bulan tanpa konfirmasi, tinjau ulang posisi", tags: ["IN_POSITION", "REVIEW_STAGE1"] };
+      }
     }
-    if (!s.freeFloatOk) return hold(NAME_V2, "Free float di luar 7%-15%", ["FREE_FLOAT_FAIL"]);
 
-    const ev = parseCorporateAnnouncements(input.announcements ?? [], sinceDays(input.now, 30));
-    const suddenAudit = input.compliance?.voluntaryInterimAudit === true || ev.suddenAudit;
-    const insider = volumeAccumulation(c, 45, SIDEWAYS_SHORT).accumulation;
-    const spike = detectVolSpike(c).spike;
-    const confirmations = [ev.anyEvent, suddenAudit, insider, spike].filter(Boolean).length;
-    if (confirmations < 2) return hold(NAME_V2, `Kandidat cangkang, konfirmasi baru ${confirmations}/4`, ["SHELL_CANDIDATE"]);
+    if (a.flags.includes("DEBUNKED")) return hold(NAME_V2, "Rumor terbantahkan atau aksi dibatalkan", ["DEBUNKED"]);
+    if (!a.structureOk) return hold(NAME_V2, `Struktur belum lolos: ${a.structureFails.join("; ")}`, ["STRUCTURE_FAIL"]);
+    if (a.stage === 0) return hold(NAME_V2, "Struktur lolos, belum ada pemicu (rumor, akumulasi senyap, laporan tertata)", ["STRUCTURE_OK", "NO_TRIGGER"]);
+
+    // --- Ukuran: cicil kecil -> deal resmi -> all-in setelah dana/aset nyata masuk ---
+    const exposure = pos?.exposurePct ?? 0;
+    // Tahap 2/3 mempertimbangkan valuasi wajar: murah = penuh, wajar = setengah, mahal = tetap level cicil, tidak diketahui = maks tahap 2
+    let target = a.stage === 1 ? CICIL_MAX_PCT : a.stage === 2 ? PLANNED_TARGET_PCT : ALL_IN_TARGET_PCT;
+    if (a.stage >= 2) {
+      const lbl = a.valuation.label;
+      if (lbl === "WAJAR") target *= 0.5;
+      else if (lbl === "MAHAL") target = Math.min(target, CICIL_MAX_PCT);
+      else if (lbl === "UNKNOWN") target = Math.min(target, PLANNED_TARGET_PCT);
+    }
+    const add = a.stage === 1 ? Math.min(CICIL_TRANCHE_PCT, target - exposure) : target - exposure;
+    if (add < 0.1) return hold(NAME_V2, `Porsi ${fmt(exposure, 1)}% sudah mencapai target tahap ${a.stage}`, ["AT_TARGET", `STAGE${a.stage}`]);
+    if ((input.trackBExposurePct ?? 0) + add > STRATEGY_MAX_EXPOSURE_PCT) {
+      return hold(NAME_V2, `Eksposur strategi akan melebihi ${STRATEGY_MAX_EXPOSURE_PCT}%`, ["STRATEGY_CAP"]);
+    }
 
     const turnover = averageTurnover(c);
-    const tags = ["SHELL_CANDIDATE"];
-    if (insider) tags.push("INSIDER_ACCUMULATION");
-    if (spike) tags.push("VOL_SPIKE_DETECTED");
-    if (ev.anyEvent) tags.push(...ev.hits.map((k) => `KEYWORD:${k}`));
-    if (suddenAudit) tags.push("SUDDEN_AUDIT");
+    const orderType: OrderType = a.stage === 1 || turnover < LIQUIDITY_LOCK ? "LIMIT_STAGED" : "MARKET";
+    const label = a.stage === 1 ? "CICIL (rumor/anomali)" : a.stage === 2 ? "DEAL RESMI >= Rp1 T" : "DANA/ASET NYATA >= Rp1 T MASUK (calon naga)";
+    const vl = a.valuation;
+    const valText = vl.ratio !== undefined ? `harga ${fmt(vl.ratio)}x NAV/saham (${vl.label}, ${vl.basis === "FAIR_VALUE" ? "nilai wajar aset" : "nilai buku"})` : "valuasi tidak diketahui";
+    const extra = [a.multiple ? `suntikan ${fmt(a.multiple, 1)}x market cap` : "", a.buyerNote ?? "", a.stage >= 2 ? valText : ""].filter(Boolean).join(", ");
     return {
       engine: NAME_V2,
       action: "BUY",
-      confidence: Math.min(0.4 + 0.1 * confirmations, 0.8),
-      reason: `Cangkang + ${confirmations}/4 konfirmasi event/akumulasi`,
+      confidence: a.stage === 1 ? 0.45 : a.stage === 2 ? 0.65 : 0.85,
+      reason: `Tahap ${a.stage} ${label}; pemicu: ${a.triggers.join(", ") || "-"}${extra ? `; ${extra}` : ""}`,
       entry: close,
-      stopLoss: close * (1 - TRAILING),
-      positionPct: confirmations >= 3 ? 5 : 2.5,
-      orderType: turnover < LIQUIDITY_LOCK ? "LIMIT_STAGED" : "MARKET",
-      tags,
+      stopLoss: a.stage >= 2 ? close * (1 - TRAILING) : undefined,
+      positionPct: add, // tambahan porsi pada tahap ini
+      orderType,
+      tags: ["STANDALONE", `STAGE${a.stage}`, ...a.triggers, ...a.flags, ...(a.stage >= 2 ? [`VALUASI_${vl.label}`] : [])],
     };
   },
 };
@@ -453,6 +626,10 @@ export const an4V3: Engine = {
   name: NAME_V3,
   analyze(input: AnalysisInput): EngineSignal {
     const hasPos = ownsPosition(input, NAME_V3);
+    if (hasPos) {
+      const emergency = emergencyExit(NAME_V3, input);
+      if (emergency) return emergency;
+    }
     const p = prepare(input, NAME_V3, hasPos);
     if (!p.ok) return p.signal;
     const f = input.fundamentals;
@@ -461,6 +638,7 @@ export const an4V3: Engine = {
     const close = c[c.length - 1].close;
 
     if (hasPos) return exitLogic(input, c);
+    if (f.der === undefined) return abstain(NAME_V3, "Butuh data DER (isi di src/data/intel.ts)", ["NEED_FUNDAMENTALS"]);
 
     const cls = classifyTrack(f);
     if (cls === "ELIMINASI") return hold(NAME_V3, "Eliminasi (PBV >= 1 atau tidak masuk Track A/B/Hybrid)", ["ELIMINATED"]);
@@ -518,7 +696,7 @@ export const an4V3: Engine = {
       takeProfit: calculateIntrinsicTarget(f, close),
       positionPct: pct,
       orderType: orderTypeFor(tier.label, turnover),
-      tags: [tier.label, `TRACK:${cls}`, `SCORE:${sc.score}`],
+      tags: ["STANDALONE", tier.label, `TRACK:${cls}`, `SCORE:${sc.score}`],
     };
   },
 };

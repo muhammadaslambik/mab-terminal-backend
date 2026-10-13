@@ -228,7 +228,7 @@ export const an3Remora: Engine = {
       takeProfit,
       positionPct: POSITION_PCT,
       orderType: "MARKET",
-      tags: ["SMART_MONEY_INFLOW"],
+      tags: ["STANDALONE", "SMART_MONEY_INFLOW"],
     };
   },
 };

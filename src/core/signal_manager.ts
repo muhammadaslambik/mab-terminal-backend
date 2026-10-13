@@ -21,6 +21,13 @@ export class SignalManager {
       return { action: "SELL", confidence: lead.confidence, reason: `EXIT oleh ${lead.engine}: ${lead.reason}`, lead };
     }
 
+    // Strategi mandiri (Andry Hakim, Remora) tidak perlu konsensus dengan engine teknikal
+    const standalone = active.filter((s) => s.action === "BUY" && s.tags?.includes("STANDALONE"));
+    if (standalone.length) {
+      const lead = standalone.reduce((m, s) => (s.confidence > m.confidence ? s : m));
+      return { action: "BUY", confidence: lead.confidence, reason: `Strategi mandiri ${lead.engine}: ${lead.reason}`, lead };
+    }
+
     const total = active.reduce((sum, s) => sum + s.confidence, 0);
     const score = (a: Action) => active.filter((s) => s.action === a).reduce((sum, s) => sum + s.confidence, 0);
     const buy = score("BUY");

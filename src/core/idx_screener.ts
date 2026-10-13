@@ -8,8 +8,8 @@ const TOP_N = 20;
 const POOL_FOR_GAINERS = 100; // top gainer dicari di antara 100 saham dengan nilai transaksi terbesar
 const MIN_TURNOVER_RP = 1_000_000_000;
 const MICRO_CAP_RP = 500_000_000_000;
-const FREE_FLOAT_MIN = 7;
-const FREE_FLOAT_MAX = 15;
+const FREE_FLOAT_MAX = 30; // kepemilikan publik > 30% dianggap jelek (owner dominan lebih baik)
+const CRASH_1Y = -0.5; // turun >= 50% dalam 1 tahun = indikasi saham gorengan
 const PE_DISCOUNT = 0.7; // PER < 70% median PER sektor
 const MAX_PE = 200; // PER ekstrem (laba hampir nol) tidak dihitung
 const MIN_SECTOR_SIZE = 5;
@@ -27,6 +27,7 @@ export interface ScreenItem {
   roe?: number;
   freeFloatPct?: number;
   marketCapRp?: number;
+  return1y?: number; // pecahan, -0.5 = turun 50%
   atrPct?: number;
 }
 
@@ -77,6 +78,7 @@ const fromStock = (s: IdxStock): ScreenItem => ({
   roe: s.roe !== undefined ? Math.round(s.roe * 10000) / 10000 : undefined,
   freeFloatPct: s.freeFloatPct,
   marketCapRp: s.marketCap,
+  return1y: s.oneYear !== undefined ? round2(s.oneYear) : undefined,
 });
 
 /** Penyaringan seluruh pasar dari data Pasardana (harga, PER, PBV, market cap, free float, ROE). */
@@ -105,15 +107,17 @@ export function screenMarket(stocks: IdxStock[], now = new Date().toISOString())
     .sort((a, b) => (a.pbv ?? 0) - (b.pbv ?? 0))
     .slice(0, TOP_N);
 
-  // Cangkang: market cap < Rp500 miliar, PBV < 1 (termasuk negatif), free float 7%-15%, masih diperdagangkan
+  // Calon target suntikan dana: market cap < Rp500 miliar, PBV < 1 (termasuk negatif), kepemilikan publik <= 30%
+  // (makin kecil makin baik), tidak hancur >= 50% dalam 1 tahun. Hutang (DER) belum ada di Pasardana: cek di data/intel.ts.
   const shellCandidates = traded
     .filter(
       (s) =>
         s.marketCap !== undefined && s.marketCap > 0 && s.marketCap < MICRO_CAP_RP &&
         s.pbv !== undefined && s.pbv < 1 &&
-        s.freeFloatPct !== undefined && s.freeFloatPct >= FREE_FLOAT_MIN && s.freeFloatPct <= FREE_FLOAT_MAX
+        s.freeFloatPct !== undefined && s.freeFloatPct > 0 && s.freeFloatPct <= FREE_FLOAT_MAX &&
+        (s.oneYear === undefined || s.oneYear > CRASH_1Y)
     )
-    .sort((a, b) => (a.marketCap ?? 0) - (b.marketCap ?? 0))
+    .sort((a, b) => (a.freeFloatPct ?? 0) - (b.freeFloatPct ?? 0) || (a.marketCap ?? 0) - (b.marketCap ?? 0))
     .slice(0, TOP_N);
 
   return {
