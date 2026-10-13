@@ -2,8 +2,9 @@ name = "api"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 
-# Konfigurasi KV dibiarkan nonaktif/kosong dengan benar tanpa memicu error array
-kv_namespaces = []
+[[kv_namespaces]]
+binding = "KV_CACHE"
+id = "ea285ebc779a4045add07bbd6a606c00"
 
 [triggers]
 crons = [
