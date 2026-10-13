@@ -33,6 +33,9 @@ export interface IdxStock {
   changePct?: number; // dihitung dari Last vs PrevClosingPrice
   marketCap?: number; // satuan mengikuti Pasardana (lihat CAP_UNIT di idx_screener)
   beta?: number;
+  roe?: number; // pecahan (0.04 = 4%)
+  freeFloatPct?: number; // persen (64.62 = 64,62%)
+  perAnnualized?: number;
   lastDate?: string;
 }
 
@@ -90,7 +93,7 @@ export function normalizeStock(rec: any): IdxStock | null {
   return {
     code,
     name: str(field(rec, "Name")) ?? code,
-    sector: str(field(rec, "SectorName")),
+    sector: str(field(rec, "NewSectorName")) ?? str(field(rec, "SectorName")),
     subSector: str(field(rec, "SubSectorName")),
     last,
     prevClose,
@@ -105,6 +108,9 @@ export function normalizeStock(rec: any): IdxStock | null {
     changePct,
     marketCap: num(field(rec, "Capitalization")),
     beta: num(field(rec, "BetaOneYear")),
+    roe: num(field(rec, "Roe")),
+    freeFloatPct: num(field(rec, "FreeFloatPct")),
+    perAnnualized: num(field(rec, "PerAnnualized")),
     lastDate: str(field(rec, "LastDate")),
   };
 }
@@ -143,14 +149,17 @@ export class PasardanaFeed {
     return extractRows(r.payload).map(normalizeStock).filter((s): s is IdxStock => s !== null);
   }
 
-  /** Seluruh saham: halaman demi halaman sampai habis (dibatasi demi jatah subrequest Worker). */
-  public async getAllStocks(maxPages = 6, perPage = 500, extra: StockQuery = {}): Promise<IdxStock[]> {
+  /**
+   * Seluruh saham, halaman demi halaman. Berhenti saat halaman kosong atau tidak ada kode baru
+   * (server boleh membatasi pageLength di bawah yang diminta). Maks 12 request.
+   */
+  public async getAllStocks(maxPages = 12, perPage = 500, extra: StockQuery = {}): Promise<IdxStock[]> {
     const byCode = new Map<string, IdxStock>();
     for (let page = 1; page <= maxPages; page++) {
       const rows = await this.getStocks({ ...extra, page, perPage });
       const before = byCode.size;
       for (const s of rows) byCode.set(s.code, s);
-      if (rows.length < perPage || byCode.size === before) break; // habis, atau halaman berulang
+      if (rows.length === 0 || byCode.size === before) break;
     }
     return [...byCode.values()];
   }
