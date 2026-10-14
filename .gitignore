@@ -3,3 +3,6 @@ node_modules/
 dist/
 .dev.vars
 .dev.vars.*
+__pycache__/
+collector/intel.json
+collector/smoke.json

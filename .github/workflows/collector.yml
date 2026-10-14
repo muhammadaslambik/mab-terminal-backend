@@ -12,7 +12,7 @@ permissions:
 
 env:
   # Ganti dengan hash commit idx-bei yang sudah Anda uji (git -C <folder idx-bei> rev-parse HEAD)
-  IDX_BEI_REF: main
+  IDX_BEI_REF: afdb5b039b1e437e73cf67a126032523ee0b5770
 
 jobs:
   collect:
