@@ -46,6 +46,11 @@ export default {
       if (!authorized) return unauthorized();
       try {
         if (url.pathname === "/api/idx/probe") {
+          // /api/idx/probe?source=idx -> uji idx.co.id dari Worker (3 request)
+          if (url.searchParams.get("source") === "idx") {
+            const { probeIdx } = await import("./feed/idx_probe");
+            return Response.json(await probeIdx());
+          }
           // /api/idx/probe?source=pasardana -> uji Pasardana dari Worker (bukan dari browser)
           if (url.searchParams.get("source") === "pasardana") {
             const { PasardanaFeed } = await import("./feed/pasardana");
