@@ -51,6 +51,16 @@ export default {
             const { probeIdx } = await import("./feed/idx_probe");
             return Response.json(await probeIdx());
           }
+          // /api/idx/probe?source=rss -> uji 10 RSS media + kolom liabilitas TradingView (15 request)
+          if (url.searchParams.get("source") === "rss") {
+            const { probeRss } = await import("./feed/source_probe");
+            return Response.json(await probeRss());
+          }
+          // /api/idx/probe?source=sources -> uji Pasardana (semua field), TradingView, Google News RSS (9 request)
+          if (url.searchParams.get("source") === "sources") {
+            const { probeSources } = await import("./feed/source_probe");
+            return Response.json(await probeSources());
+          }
           // /api/idx/probe?source=pasardana -> uji Pasardana dari Worker (bukan dari browser)
           if (url.searchParams.get("source") === "pasardana") {
             const { PasardanaFeed } = await import("./feed/pasardana");
@@ -66,6 +76,29 @@ export default {
         const { handleIdxScreening } = await import("./cron/idx_screening");
         const screen = await handleIdxScreening({});
         return screen ? Response.json(screen) : Response.json({ error: "Data Yahoo tidak tersedia, coba /api/idx/probe" }, { status: 502 });
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
+
+    // Saringan cacing-naga dari TradingView (seluruh pasar, tanpa idx.co.id). ?refresh=1 memaksa hitung ulang
+    if (url.pathname === "/api/idx/cacing") {
+      if (!authorized) return unauthorized();
+      try {
+        const { loadOrRunCacingScreen } = await import("./core/cacing_screen");
+        return Response.json(await loadOrRunCacingScreen(env, url.searchParams.get("refresh") === "1"));
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
+
+    // Rumor korporasi dari RSS media. ?matched=1 hanya yang menyebut emiten shortlist, ?refresh=1 polling sekarang
+    if (url.pathname === "/api/idx/rumor") {
+      if (!authorized) return unauthorized();
+      try {
+        const rumor = await import("./feed/rumor_rss");
+        const poll = url.searchParams.get("refresh") === "1" ? await rumor.runRumorPoll(env, { force: true }) : undefined;
+        return Response.json({ poll, ...(await rumor.readRumors(env, url.searchParams.get("matched") === "1")) });
       } catch (err) {
         return Response.json({ error: String(err) }, { status: 502 });
       }
@@ -96,9 +129,21 @@ export default {
         case "*/5 * * * *": {
           const { handleMarketPolling } = await import("./cron/market_polling");
           await handleMarketPolling(env, ctx);
+          try {
+            const { runRumorPoll } = await import("./feed/rumor_rss");
+            await runRumorPoll(env);
+          } catch (err) {
+            console.error("Rumor poll gagal:", err);
+          }
           break;
         }
         case "0 1 * * *": {
+          try {
+            const { runCacingScreen } = await import("./core/cacing_screen");
+            await runCacingScreen(env);
+          } catch (err) {
+            console.error("Saringan cacing-naga gagal:", err);
+          }
           try {
             const { handleIdxScreening } = await import("./cron/idx_screening");
             await handleIdxScreening(env);
