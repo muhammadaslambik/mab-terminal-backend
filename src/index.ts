@@ -92,6 +92,63 @@ export default {
       }
     }
 
+    // Intel idx.co.id hasil kolektor (jalan di PC rumah, IDX memblokir IP cloud).
+    // POST: gabung per kode ke KV INTEL_IDX. GET: baca semua, atau ?code=XXXX satu emiten.
+    if (url.pathname === "/api/intel") {
+      if (!authorized) return unauthorized();
+      if (!env.KV_CACHE) return Response.json({ error: "KV_CACHE tidak terpasang" }, { status: 500 });
+      try {
+        if (request.method === "POST") {
+          const text = await request.text();
+          if (text.length > 1_000_000) return Response.json({ error: "Muatan terlalu besar" }, { status: 413 });
+          let body: any;
+          try {
+            body = JSON.parse(text);
+          } catch (_e) {
+            return Response.json({ error: "JSON tidak valid" }, { status: 400 });
+          }
+          const incoming: any[] | null = Array.isArray(body?.items) ? body.items : null;
+          if (!incoming || incoming.length === 0 || incoming.length > 100) {
+            return Response.json({ error: "items harus berisi 1-100 elemen" }, { status: 400 });
+          }
+          const now = new Date().toISOString();
+          const prev: any = await env.KV_CACHE.get("INTEL_IDX", "json");
+          const byCode = new Map<string, any>();
+          for (const it of prev?.items ?? []) if (it?.code) byCode.set(it.code, it);
+          let accepted = 0;
+          for (const it of incoming) {
+            const code = typeof it?.code === "string" ? it.code.trim().toUpperCase() : "";
+            if (!/^[A-Z0-9]{2,6}$/.test(code)) continue;
+            byCode.set(code, { ...it, code, receivedAt: now });
+            accepted++;
+          }
+          if (accepted === 0) return Response.json({ error: "Tidak ada item dengan kode valid" }, { status: 400 });
+          const merged = {
+            updatedAt: now,
+            collectedAt: body.collectedAt ?? null,
+            financialPeriod: body.financialPeriod ?? null,
+            publicDefinition: body.publicDefinition ?? "Masyarakat Non Warkat",
+            items: Array.from(byCode.values()),
+          };
+          await env.KV_CACHE.put("INTEL_IDX", JSON.stringify(merged));
+          return Response.json({ ok: true, accepted, total: merged.items.length, updatedAt: now });
+        }
+        if (request.method === "GET") {
+          const data: any = await env.KV_CACHE.get("INTEL_IDX", "json");
+          if (!data) return Response.json({ error: "Belum ada intel. Jalankan kolektor dengan --push." }, { status: 404 });
+          const code = url.searchParams.get("code")?.trim().toUpperCase();
+          if (code) {
+            const item = (data.items ?? []).find((i: any) => i.code === code);
+            return item ? Response.json(item) : Response.json({ error: `Tidak ada intel untuk ${code}` }, { status: 404 });
+          }
+          return Response.json(data);
+        }
+        return Response.json({ error: "Method tidak didukung" }, { status: 405 });
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 500 });
+      }
+    }
+
     // Rumor korporasi dari RSS media. ?matched=1 hanya yang menyebut emiten shortlist, ?refresh=1 polling sekarang
     if (url.pathname === "/api/idx/rumor") {
       if (!authorized) return unauthorized();
