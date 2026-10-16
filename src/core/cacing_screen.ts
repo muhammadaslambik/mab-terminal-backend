@@ -169,13 +169,32 @@ interface IntelAnn {
 }
 export interface IntelItem {
   code: string;
+  schema?: number;
   der?: number | null;
   fsDate?: string | null;
-  publicNonWarkatPct?: number | null;
-  ownerTotalPct?: number | null;
+  publicNonWarkatPct?: number | null; // Masyarakat Non Warkat (mentah, dari seluruh saham)
+  publicBigPct?: number | null; // baris >5% bernama "Masyarakat" (publik terkonsolidasi)
+  ownerTotalPct?: number | null; // semua baris lain selain treasury (mentah)
+  treasuryPct?: number | null;
+  holdersTotalPct?: number | null; // jumlah seluruh baris; harus ~100, bila tidak komposisi tidak lengkap
+  complete?: boolean | null;
   topHolder?: { name?: string | null; pct?: number | null; controller?: boolean } | null;
+  holders?: Array<{ kategori?: string | null; nama?: string | null; pct?: number | null; controller?: boolean }>;
   announcements?: IntelAnn[];
   receivedAt?: string;
+}
+
+export const INTEL_SCHEMA = 2; // samakan dengan collector/collect_intel.py
+// Persentase dihitung dari saham BEREDAR (tanpa treasury, yang tidak punya hak suara). Ubah ke false bila ingin dasar seluruh saham.
+export const TREASURY_EXCLUDED_FROM_BASE = true;
+
+/** Publik dan owner (persen dari saham beredar). null bila data tidak cukup. */
+export function composition(intel: IntelItem): { publicPct: number; ownerPct: number } | null {
+  const { publicNonWarkatPct: nw, publicBigPct: big, ownerTotalPct: own, treasuryPct: tr } = intel;
+  if (typeof nw !== "number" || typeof big !== "number" || typeof own !== "number" || typeof tr !== "number") return null;
+  const base = TREASURY_EXCLUDED_FROM_BASE ? 100 - tr : 100;
+  if (!(base > 0)) return null;
+  return { publicPct: round(((nw + big) / base) * 100, 2), ownerPct: round((own / base) * 100, 2) };
 }
 
 /** Aturan keputusan. Tanpa data IDX -> belum_ada_intel. Likuiditas tidak menggugurkan (sepi justru pintu masuk teori). */
@@ -197,23 +216,29 @@ export function judge(intel: IntelItem | null, oneYear: number | null, oneYearUn
   }
 
   let unknown = false;
+  let comp: { publicPct: number; ownerPct: number } | null = null;
   if (!intel) {
     unknown = true;
+  } else if (intel.schema !== INTEL_SCHEMA) {
+    unknown = true;
+    warnings.push("intel versi lama, jalankan ulang kolektor");
+  } else if (intel.complete !== true) {
+    unknown = true;
+    warnings.push(`komposisi pemegang saham tidak lengkap (jumlah baris ${intel.holdersTotalPct ?? "?"}%), tidak dinilai`);
   } else {
     const der = intel.der;
-    const pub = intel.publicNonWarkatPct;
-    const own = intel.ownerTotalPct;
     if (typeof der !== "number") unknown = true;
     else if (!(der >= 0 && der <= DER_MAX)) reasons.push(`DER IDX ${der} di atas ${DER_MAX}`);
-    if (typeof pub !== "number" || typeof own !== "number") {
+    comp = composition(intel);
+    if (!comp) {
       unknown = true;
     } else {
-      if (pub > PUBLIC_MAX_PCT) reasons.push(`publik non-warkat ${pub}% di atas ${PUBLIC_MAX_PCT}% (float tinggi, risiko gorengan)`);
-      if (own < OWNER_MIN_PCT || own > OWNER_MAX_PCT) reasons.push(`owner ${own}% di luar ${OWNER_MIN_PCT}-${OWNER_MAX_PCT}%`);
+      if (comp.publicPct > PUBLIC_MAX_PCT) reasons.push(`publik ${comp.publicPct}% di atas ${PUBLIC_MAX_PCT}% (float tinggi, risiko gorengan)`);
+      if (comp.ownerPct < OWNER_MIN_PCT || comp.ownerPct > OWNER_MAX_PCT) reasons.push(`owner ${comp.ownerPct}% di luar ${OWNER_MIN_PCT}-${OWNER_MAX_PCT}%`);
     }
   }
   const tier: Tier = reasons.length > 0 ? "gugur" : unknown ? "belum_ada_intel" : "inti";
-  return { tier, priceGate, reasons, warnings };
+  return { tier, priceGate, reasons, warnings, comp };
 }
 
 const TIER_RANK: Record<Tier, number> = { inti: 0, belum_ada_intel: 1, gugur: 2 };
@@ -255,7 +280,7 @@ export async function viewCacing(env: any, refresh = false, fetchFn: typeof fetc
     const j = judge(intel, liquidity.oneYear, oneYearUnitOk);
     tiers[j.tier]++;
     const anns = intel?.announcements ?? [];
-    const idxPub = typeof intel?.publicNonWarkatPct === "number" ? intel.publicNonWarkatPct : null;
+    const idxPub = j.comp?.publicPct ?? null;
     const fvals = [c.floatPct, liquidity.freeFloatPct, idxPub].filter((x): x is number => typeof x === "number");
     const gapPts = fvals.length >= 2 ? round(Math.max(...fvals) - Math.min(...fvals), 1) : null;
     const gapFlag = gapPts !== null && gapPts > FLOAT_GAP_FLAG_PCT;
@@ -266,15 +291,21 @@ export async function viewCacing(env: any, refresh = false, fetchFn: typeof fetc
       reasons: j.reasons,
       warnings: j.warnings,
       priceGate: j.priceGate,
-      floatCheck: { tradingview: c.floatPct, pasardana: liquidity.freeFloatPct, idxNonWarkat: idxPub, gapPts, flag: gapFlag ? "selisih_besar" : null },
+      floatCheck: { tradingview: c.floatPct, pasardana: liquidity.freeFloatPct, idxPublic: idxPub, gapPts, flag: gapFlag ? "selisih_besar" : null },
       liquidity,
       intel: intel
         ? {
             fsDate: intel.fsDate ?? null,
             der: intel.der ?? null,
+            adjusted: j.comp, // persen dari saham beredar: dasar putusan
             publicNonWarkatPct: intel.publicNonWarkatPct ?? null,
+            publicBigPct: intel.publicBigPct ?? null,
             ownerTotalPct: intel.ownerTotalPct ?? null,
+            treasuryPct: intel.treasuryPct ?? null,
+            holdersTotalPct: intel.holdersTotalPct ?? null,
+            complete: intel.complete ?? null,
             topHolder: intel.topHolder ?? null,
+            holders: intel.holders ?? [],
             receivedAt: intel.receivedAt ?? null,
             strongCount: anns.filter((a) => a.level === "kuat").length,
             announcements: anns.map((a) => ({ date: String(a.date).slice(0, 10), level: a.level, title: a.title, pdf: a.pdf ?? null })),
@@ -282,7 +313,7 @@ export async function viewCacing(env: any, refresh = false, fetchFn: typeof fetc
         : null,
     };
   });
-  const pubKey = (x: { intel: { publicNonWarkatPct: number | null } | null; floatPct: number | null }) => x.intel?.publicNonWarkatPct ?? x.floatPct ?? 999;
+  const pubKey = (x: { intel: { adjusted: { publicPct: number } | null } | null; floatPct: number | null }) => x.intel?.adjusted?.publicPct ?? x.floatPct ?? 999;
   candidates.sort((a, b) => TIER_RANK[a.tier] - TIER_RANK[b.tier] || pubKey(a) - pubKey(b));
 
   return {
@@ -295,6 +326,7 @@ export async function viewCacing(env: any, refresh = false, fetchFn: typeof fetc
         ownerMinPct: OWNER_MIN_PCT,
         ownerMaxPct: OWNER_MAX_PCT,
         oneYearDropLimit: ONE_YEAR_DROP_LIMIT,
+        treasuryExcludedFromBase: TREASURY_EXCLUDED_FROM_BASE,
       },
       tiers,
       oneYearUnitOk,

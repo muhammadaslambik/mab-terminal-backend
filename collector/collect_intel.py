@@ -53,7 +53,6 @@ WEAK = re.compile(
     re.I,
 )
 EXCLUDE = re.compile(r"tahunan|registrasi pemegang efek|laporan bulanan", re.I)
-NON_PUBLIC_SKIP = ("Masyarakat", "Saham Treasury", "Komisaris", "Direksi")
 CODE_RE = re.compile(r"^[A-Z0-9]{2,6}$")
 
 
@@ -192,33 +191,74 @@ def stage_structure(fin_rows, today):
     return cands, why
 
 
-def holders_summary(detail):
+# Persentase publik/owner dihitung dari saham BEREDAR (tanpa treasury). Samakan dengan TREASURY_EXCLUDED_FROM_BASE di cacing_screen.ts.
+TREASURY_EXCLUDED = True
+TOTAL_TOL = 1.5          # jumlah seluruh baris pemegang harus 100 +/- ini, bila tidak komposisi dianggap tidak lengkap
+DETAIL_ATTEMPTS = 3
+INTEL_SCHEMA = 2
+_NOT_NAMED = ("Masyarakat Non Warkat", "Masyarakat Warkat", "Saham Treasury")
+
+
+def _pct(r):
+    return r.get("Persentase") or 0
+
+
+def _public_name(r):
+    return str(r.get("Nama") or "").strip().lower().startswith("masyarakat")
+
+
+def composition(detail):
+    """Pecah komposisi pemegang saham.
+    publik = Masyarakat Non Warkat + baris >5% bernama 'Masyarakat' (publik terkonsolidasi, mis. KIOS 59,7%).
+    owner  = semua baris lain selain treasury (termasuk Masyarakat Warkat, Komisaris, Direksi)."""
     rows = detail.get("PemegangSaham") or []
-    non_warkat = sum(r.get("Persentase") or 0 for r in rows if r.get("Kategori") == "Masyarakat Non Warkat")
-    warkat = sum(r.get("Persentase") or 0 for r in rows if r.get("Kategori") == "Masyarakat Warkat")
-    owner_total = sum(
-        r.get("Persentase") or 0
-        for r in rows
-        if r.get("Kategori") not in ("Masyarakat Non Warkat", "Saham Treasury")
-    )
-    holders = [r for r in rows if not str(r.get("Kategori", "")).startswith(NON_PUBLIC_SKIP)]
-    top = max(holders, key=lambda r: r.get("Persentase") or 0, default=None)
-    return non_warkat, warkat, top, owner_total
+    nonw = sum(_pct(r) for r in rows if r.get("Kategori") == "Masyarakat Non Warkat")
+    warkat = sum(_pct(r) for r in rows if r.get("Kategori") == "Masyarakat Warkat")
+    treasury = sum(_pct(r) for r in rows if r.get("Kategori") == "Saham Treasury")
+    big_pub = sum(_pct(r) for r in rows if r.get("Kategori") not in _NOT_NAMED and _public_name(r))
+    total = sum(_pct(r) for r in rows)
+    owner = total - nonw - treasury - big_pub
+    named = [r for r in rows if r.get("Kategori") not in _NOT_NAMED and not _public_name(r) and _pct(r) > 0]
+    top = max(named, key=_pct, default=None)
+    holders = sorted((r for r in rows if _pct(r) >= 1), key=_pct, reverse=True)[:10]
+    base = (100 - treasury) if TREASURY_EXCLUDED else 100
+    return {
+        "nonw": nonw, "warkat": warkat, "treasury": treasury, "big_pub": big_pub, "total": total, "owner": owner,
+        "top": top, "holders": holders,
+        "complete": bool(rows) and abs(total - 100) <= TOTAL_TOL,
+        "pub_adj": ((nonw + big_pub) / base * 100) if base > 0 else None,
+        "owner_adj": (owner / base * 100) if base > 0 else None,
+    }
 
 
 def _r2(x):
     return None if x is None else round(x, 2)
 
 
+def fetch_detail_complete(client, code):
+    """Ambil detail emiten; ulangi bila komposisi tidak berjumlah ~100% (respons IDX kadang kehilangan baris)."""
+    last = None
+    for i in range(DETAIL_ATTEMPTS):
+        d = call(fetch_company_detail, code, client=client)
+        if d is None:
+            break  # gagal total (call sudah mengulang sekali): jangan hitung lagi sebagai kegagalan beruntun
+        last = d
+        if composition(d)["complete"]:
+            return d
+        if i < DETAIL_ATTEMPTS - 1:
+            pause()
+    return last
+
+
 def build_item(r, detail):
-    """Bangun item lengkap plus `checks` (True/False/None=data tidak ada) untuk tiap aturan struktur."""
-    has = bool(detail and detail.get("PemegangSaham"))
-    if has:
-        pub, warkat, top, owner = holders_summary(detail)
-    else:
-        pub = warkat = owner = top = None
+    """Item lengkap plus `checks` (True/False/None=tidak bisa dinilai). Komposisi tidak lengkap -> checks publik/owner None."""
+    c = composition(detail) if detail and detail.get("PemegangSaham") else None
+    ok = bool(c and c["complete"])
     der = r.get("deRatio")
+    top = c["top"] if c else None
+    pa, oa = (c["pub_adj"], c["owner_adj"]) if ok else (None, None)
     return {
+        "schema": INTEL_SCHEMA,
         "code": (r.get("code") or "").strip(),
         "name": r.get("stockName"),
         "sector": r.get("sector"),
@@ -229,18 +269,26 @@ def build_item(r, detail):
         "equityBn": r.get("equity"),
         "profitPeriodBn": r.get("profitPeriod"),
         "audited": r.get("audit"),
-        "publicNonWarkatPct": _r2(pub),
-        "publicWarkatPct": _r2(warkat),
-        "ownerTotalPct": _r2(owner),
+        "publicNonWarkatPct": _r2(c["nonw"]) if c else None,
+        "publicBigPct": _r2(c["big_pub"]) if c else None,
+        "publicWarkatPct": _r2(c["warkat"]) if c else None,
+        "ownerTotalPct": _r2(c["owner"]) if c else None,
+        "treasuryPct": _r2(c["treasury"]) if c else None,
+        "holdersTotalPct": _r2(c["total"]) if c else None,
+        "complete": ok if c else None,
+        "adjustedPublicPct": _r2(pa),
+        "adjustedOwnerPct": _r2(oa),
         "topHolder": {
             "name": (top or {}).get("Nama"),
             "pct": (top or {}).get("Persentase"),
             "controller": bool((top or {}).get("Pengendali")),
         },
+        "holders": [{"kategori": h.get("Kategori"), "nama": h.get("Nama"), "pct": h.get("Persentase"),
+                     "controller": bool(h.get("Pengendali"))} for h in (c["holders"] if c else [])],
         "checks": {
             "der": None if der is None else (0 <= der <= DER_MAX),
-            "public": None if pub is None else (pub <= PUBLIC_MAX_PCT),
-            "owner": None if owner is None else (OWNER_MIN_PCT <= owner <= OWNER_MAX_PCT),
+            "public": None if pa is None else (_r2(pa) <= PUBLIC_MAX_PCT),
+            "owner": None if oa is None else (OWNER_MIN_PCT <= _r2(oa) <= OWNER_MAX_PCT),
         },
     }
 
@@ -333,7 +381,9 @@ def main():
         print(f"Mode kode: {len(codes)} emiten: {','.join(codes)}")
         if args.missing_only:
             try:
-                have = {i.get("code") for i in (worker_call("GET", "/api/intel").get("items") or [])}
+                # "sudah ada" = intel skema terbaru DAN komposisi lengkap; data lama/tidak lengkap dianggap belum ada
+                have = {i.get("code") for i in (worker_call("GET", "/api/intel").get("items") or [])
+                        if i.get("schema") == INTEL_SCHEMA and i.get("complete") is True}
             except RuntimeError as e:
                 if "HTTP 404" not in str(e):
                     print("GAGAL:", e)
@@ -341,7 +391,7 @@ def main():
                 have = set()
             skipped = [c for c in codes if c in have]
             codes = [c for c in codes if c not in have]
-            print(f"--missing-only: {len(skipped)} kode sudah punya intel dilewati, {len(codes)} diproses: {','.join(codes)}")
+            print(f"--missing-only: {len(skipped)} kode sudah punya intel valid dilewati, {len(codes)} diproses: {','.join(codes)}")
             if not codes:
                 print("Tidak ada kode baru.")
                 return 0
@@ -376,7 +426,7 @@ def main():
                 if r is None:
                     missing.append(code)
                     r = {"code": code}
-                detail = call(fetch_company_detail, code, client=client)
+                detail = fetch_detail_complete(client, code)
                 item = build_item(r, detail)
                 pause()
                 item["announcements"] = fetch_announcements(client, code, today)
@@ -392,7 +442,7 @@ def main():
             why2 = {"tanpa_detail": 0, "publik": 0, "owner": 0}
             for n, r in enumerate(cands, 1):
                 code = (r.get("code") or "").strip()
-                detail = call(fetch_company_detail, code, client=client)
+                detail = fetch_detail_complete(client, code)
                 item, reason = stage_holders(r, detail)
                 if item:
                     items.append(item)
@@ -414,7 +464,16 @@ def main():
         print("BERHENTI:", e)
         out.update({"partial": True, "financialPeriod": period, "items": items})
         save(out, args.out)
-        print("Hasil sebagian disimpan, TIDAK dikirim ke Worker.")
+        valid = [it for it in items if it.get("complete") is True]  # hanya yang komposisinya lengkap; Worker menggabungkan per kode
+        if args.push and valid:
+            try:
+                res = worker_call("POST", "/api/intel", {**out, "items": valid})
+                print(f"Sebagian: {len(valid)} emiten lengkap dikirim ke Worker:", {k: res.get(k) for k in ("ok", "accepted", "total", "updatedAt")})
+            except RuntimeError as e2:
+                print("GAGAL kirim sebagian:", e2)
+        elif args.push:
+            print("Sebagian: belum ada emiten lengkap untuk dikirim.")
+        print("Lanjutkan nanti dengan --missing-only (tunggu beberapa menit; pertimbangkan COLLECT_SLEEP=3).")
         return 2
     except RuntimeError as e:
         print("GAGAL:", e)

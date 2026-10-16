@@ -116,13 +116,20 @@ export default {
           const byCode = new Map<string, any>();
           for (const it of prev?.items ?? []) if (it?.code) byCode.set(it.code, it);
           let accepted = 0;
+          let keptPrevious = 0;
           for (const it of incoming) {
             const code = typeof it?.code === "string" ? it.code.trim().toUpperCase() : "";
             if (!/^[A-Z0-9]{2,6}$/.test(code)) continue;
+            // Data baru yang komposisinya tidak lengkap tidak boleh menimpa data lengkap sebelumnya (respons IDX kadang kehilangan baris)
+            const old = byCode.get(code);
+            if (it?.complete !== true && old?.complete === true && old?.schema === it?.schema) {
+              keptPrevious++;
+              continue;
+            }
             byCode.set(code, { ...it, code, receivedAt: now });
             accepted++;
           }
-          if (accepted === 0) return Response.json({ error: "Tidak ada item dengan kode valid" }, { status: 400 });
+          if (accepted === 0 && keptPrevious === 0) return Response.json({ error: "Tidak ada item dengan kode valid" }, { status: 400 });
           const merged = {
             updatedAt: now,
             collectedAt: body.collectedAt ?? null,
@@ -131,7 +138,7 @@ export default {
             items: Array.from(byCode.values()),
           };
           await env.KV_CACHE.put("INTEL_IDX", JSON.stringify(merged));
-          return Response.json({ ok: true, accepted, total: merged.items.length, updatedAt: now });
+          return Response.json({ ok: true, accepted, keptPrevious, total: merged.items.length, updatedAt: now });
         }
         if (request.method === "GET") {
           const data: any = await env.KV_CACHE.get("INTEL_IDX", "json");
