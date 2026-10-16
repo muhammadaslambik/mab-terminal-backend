@@ -316,6 +316,7 @@ def main():
     ap.add_argument("--codes", help="daftar kode dipisah koma, melewati saringan DER/usia")
     ap.add_argument("--from-worker", action="store_true", help="ambil daftar kode dari /api/idx/cacing")
     ap.add_argument("--push", action="store_true", help="kirim hasil ke Worker (POST /api/intel)")
+    ap.add_argument("--missing-only", action="store_true", help="lewati kode yang sudah punya intel di Worker (GET /api/intel)")
     args = ap.parse_args()
 
     codes_mode = bool(args.codes or args.from_worker)
@@ -330,6 +331,20 @@ def main():
             print("GAGAL:", e)
             return 2
         print(f"Mode kode: {len(codes)} emiten: {','.join(codes)}")
+        if args.missing_only:
+            try:
+                have = {i.get("code") for i in (worker_call("GET", "/api/intel").get("items") or [])}
+            except RuntimeError as e:
+                if "HTTP 404" not in str(e):
+                    print("GAGAL:", e)
+                    return 2
+                have = set()
+            skipped = [c for c in codes if c in have]
+            codes = [c for c in codes if c not in have]
+            print(f"--missing-only: {len(skipped)} kode sudah punya intel dilewati, {len(codes)} diproses: {','.join(codes)}")
+            if not codes:
+                print("Tidak ada kode baru.")
+                return 0
     if args.push:
         try:
             worker_token()  # gagal cepat sebelum 50 request ke IDX

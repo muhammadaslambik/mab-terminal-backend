@@ -81,12 +81,12 @@ export default {
       }
     }
 
-    // Saringan cacing-naga dari TradingView (seluruh pasar, tanpa idx.co.id). ?refresh=1 memaksa hitung ulang
+    // Saringan cacing-naga dari TradingView + likuiditas Pasardana. ?refresh=1 memaksa hitung ulang keduanya
     if (url.pathname === "/api/idx/cacing") {
       if (!authorized) return unauthorized();
       try {
-        const { loadOrRunCacingScreen } = await import("./core/cacing_screen");
-        return Response.json(await loadOrRunCacingScreen(env, url.searchParams.get("refresh") === "1"));
+        const { viewCacing } = await import("./core/cacing_screen");
+        return Response.json(await viewCacing(env, url.searchParams.get("refresh") === "1"));
       } catch (err) {
         return Response.json({ error: String(err) }, { status: 502 });
       }
@@ -214,6 +214,17 @@ export default {
         case "0 0 */3 * *": {
           const { handleKeepAlive } = await import("./cron/keep_alive");
           await handleKeepAlive(env, ctx);
+          break;
+        }
+        case "0 14 * * *": {
+          // 21:00 WIB, setelah bursa tutup: nilai transaksi harian kandidat cacing-naga dari Pasardana.
+          // (rekap_sore belum tersambung; bila nanti disambung, taruh di case ini setelah blok likuiditas.)
+          try {
+            const { runCacingLiquidity } = await import("./core/cacing_screen");
+            await runCacingLiquidity(env);
+          } catch (err) {
+            console.error("Likuiditas cacing-naga gagal:", err);
+          }
           break;
         }
         default:
