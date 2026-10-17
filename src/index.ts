@@ -31,7 +31,7 @@ export default {
             const key = market === "idx" ? `SIGNAL_IDX_${s}` : `SIGNAL_${s}`;
             const cached: any = env.KV_CACHE ? await env.KV_CACHE.get(key, "json") : null;
             if (cached) return { symbol: s, computedAt: cached.computedAt, decision: cached.decision };
-            const decision = market === "idx" ? await svc.analyzeIdx(s, screen ? marketRankFor(screen, s) : undefined) : await svc.analyzeCrypto(s);
+            const decision = market === "idx" ? await svc.analyzeIdx(s, screen ? marketRankFor(screen, s) : undefined, undefined, undefined, env) : await svc.analyzeCrypto(s);
             return { symbol: s, computedAt: Date.now(), decision };
           } catch (err) {
             return { symbol: s, error: String(err) };
