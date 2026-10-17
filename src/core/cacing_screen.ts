@@ -349,3 +349,35 @@ export async function viewCacing(env: any, refresh = false, fetchFn: typeof fetc
     },
   };
 }
+
+/* ------------------------- daftar pantauan rumor ------------------------- */
+
+export interface WatchEmiten {
+  code: string;
+  name: string | null;
+}
+
+/**
+ * Untuk pemantau rumor: semua kandidat (untuk menandai judul) dan himpunan tingkat "inti" (untuk peringatan).
+ * Hanya membaca cache KV (tanpa jaringan); 3 operasi KV.
+ */
+export async function loadWatchlist(env: any, now = new Date()): Promise<{ all: WatchEmiten[]; inti: Set<string> }> {
+  const kv = env?.KV_CACHE;
+  const none = { all: [] as WatchEmiten[], inti: new Set<string>() };
+  if (!kv) return none;
+  const screen: CacingScreen | null = await kv.get(KEY, "json");
+  if (!screen) return none;
+  const rawSnap: LiquiditySnapshot | null = await kv.get(LIQ_KEY, "json");
+  const snap = rawSnap && rawSnap.v === 3 ? rawSnap : null;
+  const intelDoc: any = await kv.get("INTEL_IDX", "json");
+  const intelBy = new Map<string, IntelItem>();
+  for (const it of (intelDoc?.items ?? []) as IntelItem[]) if (it?.code) intelBy.set(it.code, it);
+
+  const liqs = screen.candidates.map((c) => liquidityOf(snap, c.code, now));
+  const unitOk = liqs.every((l) => l.oneYear === null || l.oneYear >= -1);
+  const inti = new Set<string>();
+  screen.candidates.forEach((c, i) => {
+    if (judge(intelBy.get(c.code) ?? null, liqs[i].oneYear, unitOk).tier === "inti") inti.add(c.code);
+  });
+  return { all: screen.candidates.map((c) => ({ code: c.code, name: c.name })), inti };
+}

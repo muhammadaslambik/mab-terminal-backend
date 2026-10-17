@@ -156,6 +156,38 @@ export default {
       }
     }
 
+    // Tes saluran peringatan (email Resend, cadangan Telegram): membuktikan secret di Worker benar tanpa menampilkannya
+    if (url.pathname === "/api/notify/test") {
+      if (!authorized) return unauthorized();
+      const { notificationConfigured, sendNotification } = await import("./notify/alert");
+      if (!notificationConfigured(env)) {
+        return Response.json({ ok: false, error: "Belum ada saluran: set RESEND_API_KEY + ALERT_EMAIL_TO (email) atau TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID" }, { status: 400 });
+      }
+      const r = await sendNotification(env, "MAB-Terminal: tes notifikasi", "Tes notifikasi MAB-Terminal berhasil. Bila Anda membaca ini, saluran peringatan bekerja.");
+      return Response.json(r, { status: r.ok ? 200 : 502 });
+    }
+
+    // Cari chat id Telegram: kirim satu pesan ke bot Anda, lalu panggil rute ini (hanya butuh TELEGRAM_BOT_TOKEN; token tidak ditampilkan)
+    if (url.pathname === "/api/telegram/chat-id") {
+      if (!authorized) return unauthorized();
+      if (!env.TELEGRAM_BOT_TOKEN) return Response.json({ ok: false, error: "TELEGRAM_BOT_TOKEN belum diset sebagai secret" }, { status: 400 });
+      const { discoverTelegramChats } = await import("./notify/telegram");
+      const r = await discoverTelegramChats(env.TELEGRAM_BOT_TOKEN);
+      return Response.json(r, { status: r.ok ? 200 : 502 });
+    }
+
+    // Tes notifikasi Telegram: membuktikan secret TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID di Worker benar (token tidak pernah ditampilkan)
+    if (url.pathname === "/api/telegram/test") {
+      if (!authorized) return unauthorized();
+      if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) {
+        return Response.json({ ok: false, error: "TELEGRAM_BOT_TOKEN atau TELEGRAM_CHAT_ID belum diset sebagai secret" }, { status: 400 });
+      }
+      const { TelegramNotifier } = await import("./notify/telegram");
+      const tg = new TelegramNotifier(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID);
+      const ok = await tg.sendAlert("MAB-Terminal: tes notifikasi Telegram berhasil.", null);
+      return Response.json({ ok, error: tg.lastError }, { status: ok ? 200 : 502 });
+    }
+
     // Rumor korporasi dari RSS media. ?matched=1 hanya yang menyebut emiten shortlist, ?refresh=1 polling sekarang
     if (url.pathname === "/api/idx/rumor") {
       if (!authorized) return unauthorized();
