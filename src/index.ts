@@ -225,7 +225,7 @@ export default {
   async scheduled(event: any, env: any, ctx: ExecutionContext): Promise<void> {
     try {
       const { runWithHeartbeat } = await import("./core/heartbeat");
-      await runWithHeartbeat(env, event, async () => {
+      await runWithHeartbeat(env, event, async (env) => {
         switch (event.cron) {
           case "*/5 * * * *": {
             const { handleMarketPolling } = await import("./cron/market_polling");

@@ -11,14 +11,42 @@ export const CRON_EXPECT: Record<string, CronMeta> = {
   "0 0 */3 * *": { name: "keep_alive", maxAgeMin: 100 * 60 },
 };
 
-export async function runWithHeartbeat(env: any, event: any, fn: () => Promise<void>): Promise<void> {
+const KV_METHODS = new Set(["get", "put", "delete", "list", "getWithMetadata"]);
+
+function countKv(kv: any, counter: { kv: number }): any {
+  return new Proxy(kv, {
+    get(target, prop) {
+      const v = (target as any)[prop];
+      if (typeof v !== "function") return v;
+      if (KV_METHODS.has(String(prop))) {
+        return (...args: any[]) => {
+          counter.kv++;
+          return v.apply(target, args);
+        };
+      }
+      return v.bind(target);
+    },
+  });
+}
+
+/** fn menerima env yang operasi KV-nya dihitung; fetch global juga dihitung selama fn berjalan (perkiraan subrequest, batas 50). */
+export async function runWithHeartbeat(env: any, event: any, fn: (countedEnv: any) => Promise<void>): Promise<void> {
   const meta = CRON_EXPECT[event?.cron];
   const t0 = Date.now();
+  const counter = { kv: 0, fetch: 0 };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((...args: any[]) => {
+    counter.fetch++;
+    return (realFetch as any)(...args);
+  }) as typeof fetch;
+  const countedEnv = env?.KV_CACHE ? { ...env, KV_CACHE: countKv(env.KV_CACHE, counter) } : env;
   let failure: unknown = null;
   try {
-    await fn();
+    await fn(countedEnv);
   } catch (e) {
     failure = e;
+  } finally {
+    globalThis.fetch = realFetch;
   }
   if (meta && env?.KV_CACHE) {
     const nominal = new Date(typeof event?.scheduledTime === "number" ? event.scheduledTime : t0);
@@ -34,6 +62,8 @@ export async function runWithHeartbeat(env: any, event: any, fn: () => Promise<v
             durationMs: Date.now() - t0,
             ok: failure === null,
             error: failure === null ? null : String(failure).slice(0, 300),
+            // perkiraan; belum termasuk 1 tulis heartbeat ini dan pekerjaan latar (waitUntil)
+            subrequests: { fetch: counter.fetch, kv: counter.kv, total: counter.fetch + counter.kv },
           })
         );
       } catch (_e) {
@@ -63,7 +93,7 @@ export async function readHeartbeats(env: any): Promise<{ status: "healthy" | "d
     const stale = !Number.isFinite(ageMin) || ageMin > meta.maxAgeMin;
     const state = hb.ok === false ? "gagal" : stale ? "basi" : "ok";
     if (state !== "ok") degraded = true;
-    crons.push({ name: meta.name, cron, state, lastRunAt: hb.lastRunAt, ageMin, maxAgeMin: meta.maxAgeMin, durationMs: hb.durationMs, error: hb.error });
+    crons.push({ name: meta.name, cron, state, lastRunAt: hb.lastRunAt, ageMin, maxAgeMin: meta.maxAgeMin, durationMs: hb.durationMs, subrequests: hb.subrequests ?? null, error: hb.error });
   }
   return { status: degraded ? "degraded" : "healthy", now: new Date(now).toISOString(), crons };
 }
