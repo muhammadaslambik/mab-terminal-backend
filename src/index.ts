@@ -8,7 +8,10 @@ export default {
     const authorized = !!env.API_TOKEN && request.headers.get("Authorization") === `Bearer ${env.API_TOKEN}`;
 
     if (url.pathname === "/api/health") {
-      return Response.json({ status: "healthy" });
+      // Tanpa token: hanya status hidup. Dengan token: heartbeat tiap cron (ok/basi/gagal).
+      if (!authorized) return Response.json({ status: "healthy" });
+      const { readHeartbeats } = await import("./core/heartbeat");
+      return Response.json(await readHeartbeats(env));
     }
 
     // Sinyal engine. Contoh: /api/signals?symbols=BTC,ETH  atau  /api/signals?market=idx&symbols=BBCA,BBRI
@@ -100,7 +103,7 @@ export default {
       try {
         if (request.method === "POST") {
           const text = await request.text();
-          if (text.length > 1_000_000) return Response.json({ error: "Muatan terlalu besar" }, { status: 413 });
+          if (text.length > 1_000_000) return Response.json({ error: "Muatan terlalu besar" }, {status: 413 });
           let body: any;
           try {
             body = JSON.parse(text);
@@ -180,7 +183,7 @@ export default {
     if (url.pathname === "/api/telegram/test") {
       if (!authorized) return unauthorized();
       if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) {
-        return Response.json({ ok: false, error: "TELEGRAM_BOT_TOKEN atau TELEGRAM_CHAT_ID belum diset sebagai secret" }, { status: 400 });
+        return Response.json({ ok: false, error: "TELEGRAM_BOT_TOKEN atau TELEGRAM_CHAT_ID belumdiset sebagai secret" }, { status: 400 });
       }
       const { TelegramNotifier } = await import("./notify/telegram");
       const tg = new TelegramNotifier(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID);
@@ -221,54 +224,70 @@ export default {
 
   async scheduled(event: any, env: any, ctx: ExecutionContext): Promise<void> {
     try {
-      switch (event.cron) {
-        case "*/5 * * * *": {
-          const { handleMarketPolling } = await import("./cron/market_polling");
-          await handleMarketPolling(env, ctx);
-          try {
-            const { runRumorPoll } = await import("./feed/rumor_rss");
-            await runRumorPoll(env);
-          } catch (err) {
-            console.error("Rumor poll gagal:", err);
+      const { runWithHeartbeat } = await import("./core/heartbeat");
+      await runWithHeartbeat(env, event, async () => {
+        switch (event.cron) {
+          case "*/5 * * * *": {
+            const { handleMarketPolling } = await import("./cron/market_polling");
+            await handleMarketPolling(env, ctx);
+            try {
+              const { runRumorPoll } = await import("./feed/rumor_rss");
+              await runRumorPoll(env);
+            } catch (err) {
+              console.error("Rumor poll gagal:", err);
+            }
+            break;
           }
-          break;
-        }
-        case "0 1 * * *": {
-          try {
-            const { runCacingScreen } = await import("./core/cacing_screen");
-            await runCacingScreen(env);
-          } catch (err) {
-            console.error("Saringan cacing-naga gagal:", err);
+          case "0 1 * * *": {
+            try {
+              const { runCacingScreen } = await import("./core/cacing_screen");
+              await runCacingScreen(env);
+            } catch (err) {
+              console.error("Saringan cacing-naga gagal:", err);
+            }
+            try {
+              const { handleIdxScreening } = await import("./cron/idx_screening");
+              await handleIdxScreening(env);
+            } catch (err) {
+              console.error("IDX screening gagal:", err);
+            }
+            const { handleScreeningPagi } = await import("./cron/screening_pagi");
+            await handleScreeningPagi(env, ctx);
+            break;
           }
-          try {
-            const { handleIdxScreening } = await import("./cron/idx_screening");
-            await handleIdxScreening(env);
-          } catch (err) {
-            console.error("IDX screening gagal:", err);
+          case "0 0 */3 * *": {
+            const { handleKeepAlive } = await import("./cron/keep_alive");
+            await handleKeepAlive(env, ctx);
+            break;
           }
-          const { handleScreeningPagi } = await import("./cron/screening_pagi");
-          await handleScreeningPagi(env, ctx);
-          break;
-        }
-        case "0 0 */3 * *": {
-          const { handleKeepAlive } = await import("./cron/keep_alive");
-          await handleKeepAlive(env, ctx);
-          break;
-        }
-        case "0 14 * * *": {
-          // 21:00 WIB, setelah bursa tutup: nilai transaksi harian kandidat cacing-naga dari Pasardana.
-          // (rekap_sore belum tersambung; bila nanti disambung, taruh di case ini setelah blok likuiditas.)
-          try {
-            const { runCacingLiquidity } = await import("./core/cacing_screen");
-            await runCacingLiquidity(env);
-          } catch (err) {
-            console.error("Likuiditas cacing-naga gagal:", err);
+          case "0 14 * * *": {
+            // 21:00 WIB, setelah bursa tutup: nilai transaksi harian kandidat cacing-naga dari Pasardana.
+            // (rekap_sore belum tersambung; bila nanti disambung, taruh di case ini setelah blok likuiditas.)
+            try {
+              const { runCacingLiquidity } = await import("./core/cacing_screen");
+              await runCacingLiquidity(env);
+            } catch (err) {
+              console.error("Likuiditas cacing-naga gagal:", err);
+            }
+            try {
+              const { runDailySummary } = await import("./core/daily_summary");
+              const res = await runDailySummary(env);
+              console.log("Ringkasan harian:", res.sent ? "terkirim" : "tidak dikirim", res.reason);
+            } catch (err) {
+              console.error("Ringkasan harian gagal:", err);
+            }
+            break;
           }
-          break;
+          case "0 13 * * *": {
+            // 20:00 WIB: email hanya bila ada cron basi/gagal (tidak ada email bila sehat).
+            const { runHealthAlert } = await import("./core/health_alert");
+            await runHealthAlert(env);
+            break;
+          }
+          default:
+            console.log(`Cron ${event.cron} belum punya handler.`);
         }
-        default:
-          console.log(`Cron ${event.cron} belum punya handler.`);
-      }
+      });
     } catch (err) {
       console.error(`Cron ${event.cron} gagal:`, err);
       throw err; // supaya kegagalan tercatat di dashboard Cloudflare
