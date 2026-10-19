@@ -203,6 +203,17 @@ export default {
       }
     }
 
+    // Wire News nyata (judul RSS media Indonesia), cache KV 10 menit. ?refresh=1 memaksa ambil ulang (6 fetch)
+    if (url.pathname === "/api/market/news") {
+      if (!authorized) return unauthorized();
+      try {
+        const { loadNews } = await import("./feed/news_wire");
+        return Response.json(await loadNews(env, url.searchParams.get("refresh") === "1"));
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
+
     // Data pasar nyata untuk frontend (Yahoo + TradingView), cache KV 5 menit. ?refresh=1 memaksa build ulang (~30 fetch)
     if (url.pathname === "/api/market/overview") {
       if (!authorized) return unauthorized();
