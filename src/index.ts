@@ -203,6 +203,28 @@ export default {
       }
     }
 
+    // Data pasar nyata untuk frontend (Yahoo + TradingView), cache KV 5 menit. ?refresh=1 memaksa build ulang (~30 fetch)
+    if (url.pathname === "/api/market/overview") {
+      if (!authorized) return unauthorized();
+      try {
+        const { loadMarketOverview } = await import("./feed/market_data");
+        return Response.json(await loadMarketOverview(env, url.searchParams.get("refresh") === "1"));
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
+
+    // Diagnosa sumber data pasar global dari Worker. /api/market/probe?group=index|fx|cmdty|crypto|us|id|tv (hanya lewat Worker langsung, tidak ada di proxy Pages)
+    if (url.pathname === "/api/market/probe") {
+      if (!authorized) return unauthorized();
+      try {
+        const { probeMarket } = await import("./feed/market_probe");
+        return Response.json(await probeMarket(url.searchParams.get("group")));
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
+
     if (url.pathname === "/api/trade-test") {
       if (!authorized) return unauthorized();
       try {
