@@ -214,6 +214,17 @@ export default {
       }
     }
 
+    // Uji terjemahan Workers AI (diagnosa, hanya via Worker langsung; tidak ada di daftar putih proxy Pages)
+    if (url.pathname === "/api/market/translate-probe") {
+      if (!authorized) return unauthorized();
+      try {
+        const { probeTranslate } = await import("./feed/translate");
+        return Response.json(await probeTranslate(env));
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
+
     // Data pasar nyata untuk frontend (Yahoo + TradingView), cache KV 5 menit. ?refresh=1 memaksa build ulang (~30 fetch)
     if (url.pathname === "/api/market/overview") {
       if (!authorized) return unauthorized();

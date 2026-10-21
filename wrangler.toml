@@ -14,3 +14,5 @@ crons = [
   "0 13 * * *",  # health_check (20:00 WIB / 13:00 UTC)
   "0 0 */3 * *"  # keep_alive (Tiap 3 hari)
 ]
+[ai]
+binding = "AI"
