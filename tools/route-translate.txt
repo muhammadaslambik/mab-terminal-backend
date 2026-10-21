@@ -1,0 +1,11 @@
+    // Uji terjemahan Workers AI (diagnosa, hanya via Worker langsung; tidak ada di daftar putih proxy Pages)
+    if (url.pathname === "/api/market/translate-probe") {
+      if (!authorized) return unauthorized();
+      try {
+        const { probeTranslate } = await import("./feed/translate");
+        return Response.json(await probeTranslate(env));
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
+
