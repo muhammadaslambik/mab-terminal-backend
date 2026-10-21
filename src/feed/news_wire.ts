@@ -1,6 +1,7 @@
 // Wire News nyata: judul berita bisnis dari 6 RSS media Indonesia yang sama dengan pemantau rumor.
-// Hanya judul + tautan + sumber + waktu terbit (bukan isi artikel). Cache KV 10 menit; digabung dengan cache lama (maks 72 jam).
-import { RUMOR_FEEDS, RUMOR_RE, parseRss } from "./rumor_rss";
+// Judul + tautan + sumber + waktu terbit + cuplikan deskripsi dari RSS (bukan isi artikel penuh). Cache KV 10 menit; digabung dengan cache lama (maks 72 jam).
+import { RUMOR_FEEDS, RUMOR_RE } from "./rumor_rss";
+import { parseRssNews } from "./news_parse";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36";
 const KEY = "NEWS_WIRE";
@@ -17,16 +18,17 @@ export interface NewsItem {
   ts: number; // ms epoch
   time: string; // ISO
   corporateAction: boolean;
+  summary: string; // cuplikan deskripsi RSS apa adanya (sudah dibersihkan dari tag); "" bila feed tidak menyediakan
 }
 
 async function fetchFeed(name: string, url: string, now: number): Promise<{ items: NewsItem[]; error: string | null }> {
   try {
     const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/rss+xml, application/xml, text/xml, */*" } });
     if (!res.ok) return { items: [], error: `${name}: HTTP ${res.status}` };
-    const items: NewsItem[] = parseRss(await res.text(), PER_FEED).map((it) => {
+    const items: NewsItem[] = parseRssNews(await res.text(), PER_FEED).map((it) => {
       let ts = Date.parse(it.pubDate);
       if (!isFinite(ts) || ts > now + 3600000) ts = now; // tanggal rusak atau di masa depan
-      return { title: it.title, link: it.link, source: name, ts, time: new Date(ts).toISOString(), corporateAction: RUMOR_RE.test(it.title) };
+      return { title: it.title, link: it.link, source: name, ts, time: new Date(ts).toISOString(), corporateAction: RUMOR_RE.test(it.title), summary: it.summary };
     });
     return { items, error: null };
   } catch (e) {
@@ -53,7 +55,7 @@ export async function loadNews(env: any, refresh = false): Promise<Record<string
   if (okFeeds === 0 && cached) return { ...cached, cache: "stale", staleReason: "semua RSS gagal", feedErrors };
 
   const byLink = new Map<string, NewsItem>();
-  for (const it of (cached?.items ?? []) as NewsItem[]) if (it?.link && now - it.ts < KEEP_MS) byLink.set(it.link, it);
+  for (const it of (cached?.items ?? []) as NewsItem[]) if (it?.link && now - it.ts < KEEP_MS) byLink.set(it.link, { ...it, summary: it.summary ?? "" });
   for (const r of results) for (const it of r.items) byLink.set(it.link, it);
   const items = Array.from(byLink.values())
     .sort((a, b) => b.ts - a.ts)
@@ -66,7 +68,7 @@ export async function loadNews(env: any, refresh = false): Promise<Record<string
     feedErrors,
     count: items.length,
     items,
-    note: "Judul dari RSS media Indonesia (bisnis/pasar). Bukan kawat berita global dan bukan konfirmasi; baca sumbernya.",
+    note: "Judul dan cuplikan deskripsi dari RSS media Indonesia (bisnis/pasar). Cuplikan bukan rangkuman isi artikel; bukan konfirmasi, baca sumbernya.",
   };
   if (kv) {
     try {
