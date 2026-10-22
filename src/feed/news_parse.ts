@@ -1,6 +1,17 @@
 // Pengurai RSS khusus berita (terpisah dari parseRss milik pemantau rumor). Tanpa impor agar mudah diuji.
+const code = (n: number): string => {
+  if (!isFinite(n) || n <= 0 || n > 0x10ffff) return "";
+  try {
+    return String.fromCodePoint(n);
+  } catch (_e) {
+    return "";
+  }
+};
+
 const ent = (s: string) =>
   s
+    .replace(/&#x([0-9a-f]+);/gi, (_m, h: string) => code(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_m, d: string) => code(parseInt(d, 10)))
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
