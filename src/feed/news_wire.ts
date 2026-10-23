@@ -1,7 +1,7 @@
 // Wire News nyata, berkategori. Indonesia (6 RSS) tetap di "items"; berita asing di "global" (amerika, dunia, crypto, xauusd).
 // Judul + tautan + sumber + waktu + cuplikan deskripsi RSS (bukan isi artikel penuh). Cache KV 10 menit; digabung dengan cache lama (maks 72 jam).
 // Judul asing diterjemahkan bertahap lewat Workers AI (hasil disimpan di item: titleId), dengan batas harian.
-// Tiap item punya sentimen (kamus kata kunci). Berita makro/fundamental juga diarsipkan 90 hari ("archive") untuk mode Investasi.
+// Tiap item punya sentimen (kamus kata kunci). Berita makro/fundamental juga diarsipkan 12 bulan ("archive") untuk mode Investasi.
 import { RUMOR_FEEDS, RUMOR_RE } from "./rumor_rss";
 import { parseRssNews } from "./news_parse";
 import { translateOne } from "./translate";
@@ -13,8 +13,8 @@ const FRESH_MS = 10 * 60 * 1000;
 const KEEP_MS = 72 * 3600 * 1000;
 const STALE_MS = 72 * 3600 * 1000;
 const STALE_OFFICIAL_MS = 14 * 24 * 3600 * 1000; // lembaga resmi terbit jarang
-const ARCH_KEEP_MS = 90 * 24 * 3600 * 1000;
-const ARCH_MAX = 200;
+const ARCH_KEEP_MS = 365 * 24 * 3600 * 1000;
+const ARCH_MAX = 600;
 const MAX_ID = 60;
 const MAX_GLOBAL = 25;
 const PER_FEED = 30;
@@ -198,7 +198,7 @@ export async function loadNews(env: any, refresh = false): Promise<Record<string
   }
   const pending = GLOBAL_CATS.flatMap((c) => global[c]).filter((i) => i.lang === "en" && !i.titleId && (i.trFail ?? 0) < TR_MAX_FAIL).length;
 
-  // Arsip makro/fundamental 90 hari (mode Investasi): cache lama + berita makro dari pembangunan ini (termasuk lembaga resmi yang jarang terbit).
+  // Arsip makro/fundamental 12 bulan (mode Investasi): cache lama + berita makro dari pembangunan ini (termasuk lembaga resmi yang jarang terbit).
   const arch = new Map<string, NewsItem>();
   for (const it of ((cached?.archive ?? []) as NewsItem[])) if (it?.link && now - it.ts < ARCH_KEEP_MS) arch.set(it.link, it);
   for (const r of results) for (const it of r.items) if (it.macro && now - it.ts < ARCH_KEEP_MS) arch.set(it.link, { ...(arch.get(it.link) ?? {}), ...it });
@@ -206,7 +206,7 @@ export async function loadNews(env: any, refresh = false): Promise<Record<string
   const archive = Array.from(arch.values())
     .sort((a, b) => b.ts - a.ts)
     .slice(0, ARCH_MAX)
-    .map((i) => ({ ...i, summary: (i.summary ?? "").slice(0, 200) }));
+    .map((i) => ({ ...i, summary: (i.summary ?? "").slice(0, 120) }));
 
   const payload = {
     builtAt: new Date(now).toISOString(),
