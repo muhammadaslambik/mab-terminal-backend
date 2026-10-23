@@ -214,6 +214,16 @@ export default {
       }
     }
 
+    // Arus mata uang (kekuatan 8 mata uang, 6 timeframe) dari TradingView scanner. Cache memori 15 dtk, tanpa KV
+    if (url.pathname === "/api/market/fxflow") {
+      if (!authorized) return unauthorized();
+      try {
+        const { loadFxFlow } = await import("./feed/fxflow");
+        return Response.json(await loadFxFlow(env));
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
     // Uji terjemahan Workers AI (diagnosa, hanya via Worker langsung; tidak ada di daftar putih proxy Pages)
     if (url.pathname === "/api/market/translate-probe") {
       if (!authorized) return unauthorized();
