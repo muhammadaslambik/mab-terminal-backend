@@ -1,21 +1,26 @@
 // Wire News nyata, berkategori. Indonesia (6 RSS) tetap di "items"; berita asing di "global" (amerika, dunia, crypto, xauusd).
 // Judul + tautan + sumber + waktu + cuplikan deskripsi RSS (bukan isi artikel penuh). Cache KV 10 menit; digabung dengan cache lama (maks 72 jam).
 // Judul asing diterjemahkan bertahap lewat Workers AI (hasil disimpan di item: titleId), dengan batas harian.
+// Tiap item punya sentimen (kamus kata kunci). Berita makro/fundamental juga diarsipkan 90 hari ("archive") untuk mode Investasi.
 import { RUMOR_FEEDS, RUMOR_RE } from "./rumor_rss";
 import { parseRssNews } from "./news_parse";
 import { translateOne } from "./translate";
+import { scoreTitle, isMacro, type Senti } from "./sentiment";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36";
 const KEY = "NEWS_WIRE";
 const FRESH_MS = 10 * 60 * 1000;
 const KEEP_MS = 72 * 3600 * 1000;
 const STALE_MS = 72 * 3600 * 1000;
+const STALE_OFFICIAL_MS = 14 * 24 * 3600 * 1000; // lembaga resmi terbit jarang
+const ARCH_KEEP_MS = 90 * 24 * 3600 * 1000;
+const ARCH_MAX = 200;
 const MAX_ID = 60;
 const MAX_GLOBAL = 25;
 const PER_FEED = 30;
-const KV_TTL_S = 3 * 24 * 3600;
+const KV_TTL_S = 7 * 24 * 3600;
 const TR_PER_RUN = 6; // terjemahan per pembangunan biasa
-const TR_PER_REFRESH = 25; // terjemahan per ?refresh=1
+const TR_PER_REFRESH = 20; // terjemahan per ?refresh=1 (15 fetch + KV + 20 terjemahan < 50 subrequest)
 const TR_MAX_FAIL = 2; // percobaan maksimal per judul
 const TR_STOP_AFTER = 3; // berhenti setelah sekian galat beruntun (kuota habis / gangguan AI)
 const TR_DAILY_CAP = 400; // batas per hari UTC (kuota gratis Workers AI belum diketahui)
@@ -28,15 +33,24 @@ interface Feed {
   url: string;
   category: NewsCat;
   lang: "id" | "en";
+  official?: boolean; // lembaga resmi: selalu dianggap makro, ambang basi lebih longgar
+  filter?: RegExp; // simpan hanya item yang judul/cuplikannya cocok (feed umum yang memuat berita non-topik)
 }
 
 const FEEDS: Feed[] = [
   ...RUMOR_FEEDS.map((f) => ({ name: f.name, url: f.url, category: "indonesia" as NewsCat, lang: "id" as const })),
   { name: "MarketWatch", url: "https://feeds.content.dowjones.io/public/rss/mw_topstories", category: "amerika", lang: "en" },
+  { name: "CNBC Top News", url: "https://www.cnbc.com/id/100003114/device/rss/rss.html", category: "amerika", lang: "en" },
+  { name: "NYT Business", url: "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml", category: "amerika", lang: "en" },
+  { name: "Federal Reserve", url: "https://www.federalreserve.gov/feeds/press_all.xml", category: "amerika", lang: "en", official: true },
   { name: "BBC Business", url: "https://feeds.bbci.co.uk/news/business/rss.xml", category: "dunia", lang: "en" },
+  { name: "The Guardian Business", url: "https://www.theguardian.com/business/rss", category: "dunia", lang: "en" },
+  { name: "ECB", url: "https://www.ecb.europa.eu/rss/press.xml", category: "dunia", lang: "en", official: true },
   { name: "Cointelegraph", url: "https://cointelegraph.com/rss", category: "crypto", lang: "en" },
   { name: "Decrypt", url: "https://decrypt.co/feed", category: "crypto", lang: "en" },
-  { name: "Google News (emas)", url: "https://news.google.com/rss/search?q=gold+price+XAUUSD&hl=en-US&gl=US&ceid=US:en", category: "xauusd", lang: "en" },
+  { name: "FXStreet", url: "https://www.fxstreet.com/rss/news", category: "xauusd", lang: "en", filter: /gold|xau|silver|bullion|precious/i },
+  { name: "Mining.com", url: "https://www.mining.com/feed/", category: "xauusd", lang: "en", filter: /gold|xau|silver|bullion|precious/i },
+  { name: "World Gold Council", url: "https://www.gold.org/rss.xml", category: "xauusd", lang: "en", official: true },
 ];
 
 export interface NewsItem {
@@ -49,6 +63,10 @@ export interface NewsItem {
   summary: string; // cuplikan deskripsi RSS apa adanya (sudah dibersihkan dari tag); "" bila feed tidak menyediakan
   category: NewsCat;
   lang: "id" | "en";
+  senti?: Senti; // estimasi otomatis dari judul (kamus kata kunci)
+  sscore?: number; // skor mentah (positif minus negatif)
+  macro?: boolean; // berita makro/fundamental (arsip mode Investasi)
+  official?: boolean; // dari lembaga resmi
   titleId?: string; // terjemahan judul (mesin) untuk berita berbahasa Inggris
   trFail?: number; // jumlah percobaan terjemahan yang gagal (maks 2 percobaan per judul)
 }
@@ -60,24 +78,34 @@ interface FeedResult {
   newestTs: number | null;
 }
 
+function enrich(it: NewsItem, official: boolean): NewsItem {
+  const s = scoreTitle(it.title);
+  return { ...it, senti: s.senti, sscore: s.score, macro: official || isMacro(it.title), official: official || undefined };
+}
+
 async function fetchFeed(feed: Feed, now: number): Promise<FeedResult> {
   try {
     const res = await fetch(feed.url, { headers: { "User-Agent": UA, Accept: "application/rss+xml, application/xml, text/xml, */*" } });
     if (!res.ok) return { feed, items: [], error: `${feed.name}: HTTP ${res.status}`, newestTs: null };
-    const items: NewsItem[] = parseRssNews(await res.text(), PER_FEED).map((it) => {
+    const items: NewsItem[] = parseRssNews(await res.text(), PER_FEED)
+      .filter((it) => !feed.filter || feed.filter.test(it.title + " " + it.summary))
+      .map((it) => {
       let ts = Date.parse(it.pubDate);
       if (!isFinite(ts) || ts > now + 3600000) ts = now; // tanggal rusak atau di masa depan
-      return {
-        title: it.title,
-        link: it.link,
-        source: feed.name,
-        ts,
-        time: new Date(ts).toISOString(),
-        corporateAction: feed.category === "indonesia" && RUMOR_RE.test(it.title),
-        summary: it.summary,
-        category: feed.category,
-        lang: feed.lang,
-      };
+      return enrich(
+        {
+          title: it.title,
+          link: it.link,
+          source: feed.name,
+          ts,
+          time: new Date(ts).toISOString(),
+          corporateAction: feed.category === "indonesia" && RUMOR_RE.test(it.title),
+          summary: it.summary,
+          category: feed.category,
+          lang: feed.lang,
+        },
+        !!feed.official,
+      );
     });
     const newestTs = items.length ? Math.max(...items.map((i) => i.ts)) : null;
     return { feed, items, error: null, newestTs };
@@ -109,7 +137,10 @@ export async function loadNews(env: any, refresh = false): Promise<Record<string
   const old: NewsItem[] = [...((cached?.items ?? []) as NewsItem[])];
   for (const c of GLOBAL_CATS) old.push(...(((cached?.global ?? {})[c] ?? []) as NewsItem[]));
   for (const it of old) {
-    if (it?.link && now - it.ts < KEEP_MS) byLink.set(it.link, { ...it, summary: it.summary ?? "", category: it.category ?? "indonesia", lang: it.lang ?? "id" });
+    if (it?.link && now - it.ts < KEEP_MS) {
+      const base = { ...it, summary: it.summary ?? "", category: it.category ?? "indonesia", lang: it.lang ?? "id" } as NewsItem;
+      byLink.set(it.link, it.senti ? base : enrich(base, !!it.official));
+    }
   }
   for (const r of results) {
     for (const it of r.items) {
@@ -123,14 +154,15 @@ export async function loadNews(env: any, refresh = false): Promise<Record<string
   const global: Record<string, NewsItem[]> = {};
   for (const c of GLOBAL_CATS) global[c] = all.filter((i) => i.category === c).slice(0, MAX_GLOBAL);
 
-  // Status per sumber (basi bila berita terbarunya lebih dari 72 jam atau feed tidak menghasilkan apa pun).
+  // Status per sumber (basi bila berita terbarunya melewati ambang atau feed tidak menghasilkan apa pun).
   const sources = results.map((r) => ({
     name: r.feed.name,
     category: r.feed.category,
+    official: !!r.feed.official,
     ok: r.error === null,
     fetched: r.items.length,
     newest: r.newestTs ? new Date(r.newestTs).toISOString() : null,
-    stale: r.error === null && (r.newestTs === null || now - r.newestTs > STALE_MS),
+    stale: r.error === null && (r.newestTs === null || now - r.newestTs > (r.feed.official ? STALE_OFFICIAL_MS : STALE_MS)),
   }));
 
   // Terjemahan judul asing, bertahap. Judul yang gagal dilewati; berhenti setelah 3 galat beruntun (mis. kuota habis).
@@ -166,6 +198,16 @@ export async function loadNews(env: any, refresh = false): Promise<Record<string
   }
   const pending = GLOBAL_CATS.flatMap((c) => global[c]).filter((i) => i.lang === "en" && !i.titleId && (i.trFail ?? 0) < TR_MAX_FAIL).length;
 
+  // Arsip makro/fundamental 90 hari (mode Investasi): cache lama + berita makro dari pembangunan ini (termasuk lembaga resmi yang jarang terbit).
+  const arch = new Map<string, NewsItem>();
+  for (const it of ((cached?.archive ?? []) as NewsItem[])) if (it?.link && now - it.ts < ARCH_KEEP_MS) arch.set(it.link, it);
+  for (const r of results) for (const it of r.items) if (it.macro && now - it.ts < ARCH_KEEP_MS) arch.set(it.link, { ...(arch.get(it.link) ?? {}), ...it });
+  for (const it of all) if (it.macro && now - it.ts < ARCH_KEEP_MS) arch.set(it.link, it); // versi dengan terjemahan
+  const archive = Array.from(arch.values())
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, ARCH_MAX)
+    .map((i) => ({ ...i, summary: (i.summary ?? "").slice(0, 200) }));
+
   const payload = {
     builtAt: new Date(now).toISOString(),
     okFeeds,
@@ -174,9 +216,10 @@ export async function loadNews(env: any, refresh = false): Promise<Record<string
     count: items.length,
     items,
     global,
+    archive,
     sources,
     translate: { day, count: used, cap: TR_DAILY_CAP, translatedNow, pending, error: trError },
-    note: "Judul dan cuplikan deskripsi dari RSS media. Cuplikan bukan rangkuman isi artikel; bukan konfirmasi, baca sumbernya. Terjemahan judul adalah terjemahan mesin dan bisa keliru.",
+    note: "Judul dan cuplikan deskripsi dari RSS media. Cuplikan bukan rangkuman isi artikel; bukan konfirmasi, baca sumbernya. Terjemahan judul adalah terjemahan mesin dan bisa keliru. Sentimen adalah estimasi otomatis dari kata kunci judul, bukan rekomendasi.",
   };
   if (kv) {
     try {
