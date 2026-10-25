@@ -218,8 +218,8 @@ export default {
     if (url.pathname === "/api/market/fxflow") {
       if (!authorized) return unauthorized();
       try {
-        const { loadFxFlow } = await import("./feed/fxflow");
-        return Response.json(await loadFxFlow(env));
+        const { loadFlow } = await import("./feed/flowx");
+        return Response.json(await loadFlow(env));
       } catch (err) {
         return Response.json({ error: String(err) }, { status: 502 });
       }
