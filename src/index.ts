@@ -224,6 +224,16 @@ export default {
         return Response.json({ error: String(err) }, { status: 502 });
       }
     }
+    // Rotasi sektor (ETF sektor AS, negara/obligasi, sektor IDX) dari TradingView scanner. Cache memori 30 dtk, tanpa KV
+    if (url.pathname === "/api/market/sectors") {
+      if (!authorized) return unauthorized();
+      try {
+        const { loadSectors } = await import("./feed/sectors");
+        return Response.json(await loadSectors(env));
+      } catch (err) {
+        return Response.json({ error: String(err) }, { status: 502 });
+      }
+    }
     // Uji terjemahan Workers AI (diagnosa, hanya via Worker langsung; tidak ada di daftar putih proxy Pages)
     if (url.pathname === "/api/market/translate-probe") {
       if (!authorized) return unauthorized();
